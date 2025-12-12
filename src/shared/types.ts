@@ -8,6 +8,59 @@ export type OperationType =
   | 'close_debt' // Закрытие долга
   | 'return' // Возврат
 
+export type UserRole = 'admin' | 'user'
+
+export interface User {
+  id: number
+  username: string
+  role: UserRole
+  email?: string | null
+  googleDriveFolderId?: string | null
+  googleDriveClientId?: string | null
+  googleDriveClientSecret?: string | null
+  createdAt: string
+  updatedAt: string
+}
+
+export interface Session {
+  id: number
+  userId: number
+  token: string
+  expiresAt: string
+  createdAt: string
+}
+
+export interface LoginPayload {
+  username: string
+  password: string
+}
+
+export interface CreateUserPayload {
+  username: string
+  password: string
+  role?: UserRole
+  email?: string | null
+}
+
+export interface UpdateUserPayload {
+  id: number
+  username?: string
+  password?: string
+  role?: UserRole
+  email?: string | null
+  googleDriveFolderId?: string | null
+   googleDriveClientId?: string | null
+   googleDriveClientSecret?: string | null
+}
+
+export type SyncStatus = 'idle' | 'syncing' | 'success' | 'error'
+
+export interface GoogleDriveConfig {
+  enabled: boolean
+  folderId?: string | null
+  lastSyncAt?: string | null
+}
+
 export interface Product {
   id: number
   name: string
@@ -170,4 +223,13 @@ export interface UpdateInfo {
   releaseUrl?: string
   releaseNotes?: string
   downloadUrl?: string
+}
+
+export interface SyncSnapshot {
+  users?: User[]
+  products: ProductSummary[]
+  operations: OperationWithProduct[]
+  reservations: Reservation[]
+  reminders: Reminder[]
+  bundles?: OperationBundle[]
 }

@@ -9,6 +9,8 @@ import type {
   StockSnapshot,
 } from '../shared/types'
 import { demoOperations, demoProducts } from './demoData'
+import { webApi } from './api-web'
+import { hybridApi, initHybridApi } from './api-hybrid'
 
 let memoryProducts = [...demoProducts]
 let memoryOperations = [...demoOperations]
@@ -82,6 +84,42 @@ const recalcStocks = () => {
 }
 
 const fallbackApi: InventoryAPI = {
+  // Auth - не реализовано в fallback
+  login: async () => {
+    throw new Error('Авторизация не доступна в демо-режиме')
+  },
+  magicLogin: async () => {
+    throw new Error('Magic login не доступен в демо-режиме')
+  },
+  logout: async () => {},
+  getCurrentUser: async () => null,
+  checkSession: async () => null,
+  // Users - не реализовано
+  listUsers: async () => [],
+  createUser: async () => {
+    throw new Error('Создание пользователей не доступно в демо-режиме')
+  },
+  updateUser: async () => {
+    throw new Error('Обновление пользователей не доступно в демо-режиме')
+  },
+  deleteUser: async () => {},
+  // Sync - не реализовано
+  saveGoogleDriveConfig: async () => ({ success: false }),
+  getGoogleDriveConfig: async () => null,
+  getGoogleDriveAuthUrl: async () => {
+    throw new Error('Google Drive не доступен в демо-режиме')
+  },
+  setGoogleDriveTokens: async () => {
+    throw new Error('Google Drive не доступен в демо-режиме')
+  },
+  startSync: async () => ({ success: false, message: 'Синхронизация не доступна в демо-режиме' }),
+  syncPull: async () => {
+    throw new Error('Синхронизация не доступна в демо-режиме')
+  },
+  syncPush: async () => {
+    throw new Error('Синхронизация не доступна в демо-режиме')
+  },
+  // Products
   listProducts: async () => memoryProducts,
   createProduct: async (payload: NewProductPayload) => {
     const now = new Date().toISOString()
@@ -346,5 +384,42 @@ const fallbackApi: InventoryAPI = {
   openReleaseUrl: async () => {},
 }
 
-export const api: InventoryAPI = window.api ?? fallbackApi
-export const hasNativeApi = Boolean(window.api)
+// Определяем источник API
+const hasElectronApi = typeof window !== 'undefined' && typeof window.api !== 'undefined'
+const forceDemoApi = import.meta.env.VITE_USE_DEMO_API === 'true'
+// Гибридный режим ВСЕГДА активен (сервер + локальный кэш)
+// Это обеспечивает синхронизацию между всеми устройствами + офлайн режим
+const useHybridMode = true
+
+type ApiMode = 'electron' | 'hybrid' | 'web' | 'demo'
+const apiMode: ApiMode = forceDemoApi 
+  ? 'demo'
+  : useHybridMode 
+    ? 'hybrid' 
+    : hasElectronApi 
+      ? 'electron' 
+      : 'web'
+
+// Инициализация гибридного API
+if (apiMode === 'hybrid') {
+  initHybridApi()
+}
+
+// Выбор API:
+// - hybrid: сервер + локальный кэш (офлайн поддержка)
+// - electron: локальная БД через IPC
+// - web: только сервер
+// - demo: демо данные
+export const api: InventoryAPI =
+  apiMode === 'hybrid' ? hybridApi :
+  apiMode === 'electron' ? window.api : 
+  apiMode === 'web' ? webApi : 
+  fallbackApi
+
+// Экспортируем вспомогательные флаги
+export { fallbackApi }
+export const hasNativeApi = apiMode !== 'demo'
+export const isDemoApi = apiMode === 'demo'
+export const isHybridMode = apiMode === 'hybrid'
+export const apiSource = apiMode
+export const serverUrl = import.meta.env.VITE_API_BASE || null

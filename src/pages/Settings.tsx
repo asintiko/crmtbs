@@ -1,13 +1,14 @@
 import { useEffect, useState } from 'react'
-import { Bell, Check, Copy, DownloadCloud, Folder, Info, MoonStar, SunMedium, RefreshCw, ExternalLink } from 'lucide-react'
+import { Bell, Check, Copy, DownloadCloud, Folder, Info, MoonStar, SunMedium, RefreshCw, ExternalLink, Trash2 } from 'lucide-react'
 
 import { Card, CardContent, CardHeader } from '@/components/Card'
 import { ThemeToggle } from '@/components/ThemeToggle'
 import { ReminderForm } from '@/components/ReminderForm'
 import { api } from '@/lib/api'
-import type { AppPaths, UpdateInfo } from '@/shared/types'
+import type { AppPaths, UpdateInfo, User, UserRole } from '@/shared/types'
 import { useInventory } from '@/providers/InventoryProvider'
 import { formatDate } from '@/lib/formatters'
+import { useAuth } from '@/providers/AuthProvider'
 
 export function SettingsPage() {
   const [paths, setPaths] = useState<AppPaths | null>(null)
@@ -15,7 +16,11 @@ export function SettingsPage() {
   const [showReminderForm, setShowReminderForm] = useState(false)
   const [updateInfo, setUpdateInfo] = useState<UpdateInfo | null>(null)
   const [isCheckingUpdates, setIsCheckingUpdates] = useState(false)
+  const [users, setUsers] = useState<User[]>([])
+  const [userForm, setUserForm] = useState({ username: '', password: '', role: 'user' as UserRole })
+  const [userError, setUserError] = useState<string | null>(null)
   const { reminders, createReminder, updateReminder } = useInventory()
+  const { isAdmin, refresh: refreshUser, user } = useAuth()
 
   useEffect(() => {
     api
@@ -23,6 +28,19 @@ export function SettingsPage() {
       .then(setPaths)
       .catch(() => setPaths(null))
   }, [])
+
+  useEffect(() => {
+    const loadUsers = async () => {
+      if (!isAdmin) return
+      try {
+        const list = await api.listUsers()
+        setUsers(list)
+      } catch (error) {
+        console.error('Не удалось загрузить пользователей', error)
+      }
+    }
+    void loadUsers()
+  }, [isAdmin])
 
   const handleBackup = async () => {
     setBackupStatus('Создание резервной копии...')
@@ -67,6 +85,38 @@ export function SettingsPage() {
     }
   }
 
+  const handleCreateUser = async () => {
+    setUserError(null)
+    if (!userForm.username.trim() || !userForm.password) {
+      setUserError('Укажите логин и пароль')
+      return
+    }
+    try {
+      const created = await api.createUser({
+        username: userForm.username.trim(),
+        password: userForm.password,
+        role: userForm.role,
+      })
+      setUsers((prev) => [...prev, created])
+      setUserForm({ username: '', password: '', role: 'user' })
+    } catch (error) {
+      setUserError(error instanceof Error ? error.message : 'Ошибка создания пользователя')
+    }
+  }
+
+  const handleDeleteUser = async (id: number) => {
+    if (!confirm('Удалить пользователя?')) return
+    try {
+      await api.deleteUser(id)
+      setUsers((prev) => prev.filter((u) => u.id !== id))
+      if (user?.id === id) {
+        await refreshUser()
+      }
+    } catch (error) {
+      setUserError(error instanceof Error ? error.message : 'Ошибка удаления пользователя')
+    }
+  }
+
   // Фильтруем напоминания: сначала активные, потом выполненные
   const activeReminders = reminders.filter((r) => !r.done)
   const doneReminders = reminders.filter((r) => r.done)
@@ -87,6 +137,84 @@ export function SettingsPage() {
           </div>
         </CardContent>
       </Card>
+
+      {isAdmin && (
+        <Card>
+          <CardHeader
+            title="Пользователи (админ)"
+            action={
+              <button
+                type="button"
+                onClick={handleCreateUser}
+                className="inline-flex items-center gap-2 rounded-lg bg-brand px-3 py-2 text-xs font-semibold text-white shadow-sm transition hover:bg-brand-muted"
+              >
+                Создать
+              </button>
+            }
+          />
+          <CardContent>
+            <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+              <div className="space-y-2">
+                <input
+                  placeholder="Логин"
+                  value={userForm.username}
+                  onChange={(e) => setUserForm((p) => ({ ...p, username: e.target.value }))}
+                  className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm dark:border-slate-700 dark:bg-slate-900"
+                />
+                <input
+                  placeholder="Пароль"
+                  type="password"
+                  value={userForm.password}
+                  onChange={(e) => setUserForm((p) => ({ ...p, password: e.target.value }))}
+                  className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm dark:border-slate-700 dark:bg-slate-900"
+                />
+                <select
+                  value={userForm.role}
+                  onChange={(e) => setUserForm((p) => ({ ...p, role: e.target.value as UserRole }))}
+                  className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm dark:border-slate-700 dark:bg-slate-900"
+                >
+                  <option value="user">Пользователь</option>
+                  <option value="admin">Админ</option>
+                </select>
+                {userError && (
+                  <div className="rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-700 dark:border-rose-800 dark:bg-rose-900/40 dark:text-rose-200">
+                    {userError}
+                  </div>
+                )}
+              </div>
+
+              <div className="space-y-2">
+                {users.map((u) => (
+                  <div
+                    key={u.id}
+                    className="flex items-center justify-between rounded-lg border border-slate-200 px-3 py-2 text-sm dark:border-slate-800"
+                  >
+                    <div>
+                      <div className="font-semibold text-slate-900 dark:text-white">{u.username}</div>
+                      <div className="text-xs text-slate-500 dark:text-slate-400">Роль: {u.role}</div>
+                    </div>
+                    {u.id !== user?.id && (
+                      <button
+                        type="button"
+                        onClick={() => handleDeleteUser(u.id)}
+                        className="text-rose-500 hover:text-rose-600"
+                        title="Удалить"
+                      >
+                        <Trash2 size={16} />
+                      </button>
+                    )}
+                  </div>
+                ))}
+                {users.length === 0 && (
+                  <div className="rounded-lg border border-dashed border-slate-300 px-3 py-2 text-xs text-slate-500 dark:border-slate-700 dark:text-slate-400">
+                    Пока нет пользователей
+                  </div>
+                )}
+              </div>
+            </div>
+          </CardContent>
+        </Card>
+      )}
 
       <Card>
         <CardHeader

@@ -2,6 +2,16 @@ import { contextBridge, ipcRenderer } from 'electron'
 import type { InventoryAPI } from '../src/shared/ipc'
 
 const api: InventoryAPI = {
+  // Auth
+  login: (payload) => ipcRenderer.invoke('auth:login', payload),
+  logout: () => ipcRenderer.invoke('auth:logout'),
+  getCurrentUser: () => ipcRenderer.invoke('auth:getCurrentUser'),
+  checkSession: (token) => ipcRenderer.invoke('auth:checkSession', token),
+  // Users
+  listUsers: () => ipcRenderer.invoke('users:list'),
+  createUser: (payload) => ipcRenderer.invoke('users:create', payload),
+  updateUser: (payload) => ipcRenderer.invoke('users:update', payload),
+  deleteUser: (id) => ipcRenderer.invoke('users:delete', id),
   listProducts: () => ipcRenderer.invoke('products:list'),
   createProduct: (payload) => ipcRenderer.invoke('products:create', payload),
   updateProduct: (payload) => ipcRenderer.invoke('products:update', payload),
@@ -19,6 +29,16 @@ const api: InventoryAPI = {
   getPaths: () => ipcRenderer.invoke('meta:paths'),
   checkForUpdates: () => ipcRenderer.invoke('updates:check'),
   openReleaseUrl: (url: string) => ipcRenderer.invoke('updates:openUrl', url),
+  saveGoogleDriveConfig: (clientId: string, clientSecret: string) =>
+    ipcRenderer.invoke('sync:saveGoogleDriveConfig', clientId, clientSecret),
+  getGoogleDriveConfig: () => ipcRenderer.invoke('sync:getGoogleDriveConfig'),
+  getGoogleDriveAuthUrl: (redirectUri?: string) =>
+    ipcRenderer.invoke('sync:getGoogleDriveAuthUrl', redirectUri),
+  setGoogleDriveTokens: (code: string, redirectUri?: string) =>
+    ipcRenderer.invoke('sync:setGoogleDriveTokens', code, redirectUri),
+  startSync: () => ipcRenderer.invoke('sync:start'),
+  syncPull: () => ipcRenderer.invoke('sync:pull'),
+  syncPush: (snapshot) => ipcRenderer.invoke('sync:push', snapshot),
 }
 
 // --------- Expose app API to the Renderer process ---------

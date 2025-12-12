@@ -9,9 +9,9 @@ import { createBackup } from './backup'
 import { InventoryDatabase } from './database'
 import type { BrowserWindow as ElectronWindow, Tray as ElectronTray, Event as ElectronEvent } from 'electron'
 
+// ESM полифилл для __dirname, __filename и require
 const require = createRequire(import.meta.url)
 const __filename = fileURLToPath(import.meta.url)
-;(globalThis as typeof globalThis & { __filename?: string }).__filename = __filename
 const __dirname = path.dirname(__filename)
 
 // The built directory structure
@@ -38,11 +38,11 @@ export const RENDERER_DIST = path.join(process.env.APP_ROOT, 'dist')
 
 process.env.VITE_PUBLIC = VITE_DEV_SERVER_URL ? path.join(process.env.APP_ROOT, 'public') : RENDERER_DIST
 
-const electronEntry = require('electron') as unknown
 const isElectronRuntime = Boolean(process.versions?.electron)
 
 // If running in plain Node (vite plugin runner), spawn Electron and exit current process.
 if (!isElectronRuntime) {
+  const electronEntry = require('electron') as unknown
   const electronPath =
     typeof electronEntry === 'string'
       ? electronEntry
@@ -54,7 +54,7 @@ if (!isElectronRuntime) {
     throw new Error('Не удалось найти путь до Electron')
   }
 
-  const child = spawn(String(electronPath), [fileURLToPath(import.meta.url)], {
+  const child = spawn(String(electronPath), [__filename], {
     stdio: 'inherit',
   })
   process.on('exit', () => child.kill())
@@ -247,6 +247,24 @@ async function bootstrap() {
   function registerIpc() {
     if (!db) return
 
+    // Auth
+    ipcMain.handle('auth:login', (_event, payload) => db?.login(payload))
+    ipcMain.handle('auth:logout', () => {})
+    ipcMain.handle('auth:getCurrentUser', () => db?.listUsers()?.[0] ?? null)
+    ipcMain.handle('auth:checkSession', (_event, token) => {
+      const session = token ? db?.getSessionByToken(token) : null
+      if (session && new Date(session.expiresAt) > new Date()) {
+        return db?.getUserById(session.userId) ?? null
+      }
+      return db?.listUsers()?.[0] ?? null
+    })
+
+    // Users
+    ipcMain.handle('users:list', () => db?.listUsers())
+    ipcMain.handle('users:create', (_event, payload) => db?.createUser(payload))
+    ipcMain.handle('users:update', (_event, payload) => db?.updateUser(payload))
+    ipcMain.handle('users:delete', (_event, id) => db?.deleteUser(id))
+
     ipcMain.handle('products:list', () => db?.listProducts())
     ipcMain.handle('products:create', (_event, payload) => db?.createProduct(payload))
     ipcMain.handle('products:update', (_event, payload) => db?.updateProduct(payload))
@@ -262,6 +280,25 @@ async function bootstrap() {
     ipcMain.handle('reminders:list', () => db?.listReminders())
     ipcMain.handle('reminders:create', (_event, payload) => db?.createReminder(payload))
     ipcMain.handle('reminders:update', (_event, payload) => db?.updateReminder(payload))
+
+    // Full snapshot sync (local)
+    ipcMain.handle('sync:pull', () => db?.exportSnapshot(true))
+    ipcMain.handle('sync:push', (_event, snapshot) => {
+      db?.importSnapshot(snapshot)
+      return { success: true }
+    })
+
+    ipcMain.handle('sync:getGoogleDriveConfig', () => {
+      const user = db?.listUsers()?.[0]
+      if (!user) return null
+      return db?.getUserGoogleDriveConfig(user.id)
+    })
+    ipcMain.handle('sync:saveGoogleDriveConfig', (_event, clientId: string, clientSecret: string) => {
+      const user = db?.listUsers()?.[0]
+      if (!db || !user) throw new Error('Пользователь не найден')
+      db.updateUserGoogleDriveConfig(user.id, clientId, clientSecret)
+      return { success: true }
+    })
 
     ipcMain.handle('backup:manual', () => {
       if (!db) throw new Error('База данных не инициализирована')

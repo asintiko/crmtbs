@@ -7,6 +7,8 @@
   "scripts": {
     "dev": "cross-env ELECTRON_RUN_AS_NODE= vite",
     "build": "tsc && vite build && electron-builder",
+    "build:web": "tsc && vite build --mode web",
+    "build:server": "tsc --project tsconfig.node.json --outDir server-build",
     "build:win": "tsc && vite build && electron-builder --win",
     "build:mac": "tsc && vite build && electron-builder --mac",
     "build:linux": "tsc && vite build && electron-builder --linux",
@@ -16,14 +18,22 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "aws-sdk": "^2.1693.0",
+    "bcrypt": "^5.1.1",
     "better-sqlite3": "^9.6.0",
     "clsx": "^2.1.1",
+    "cors": "^2.8.5",
+    "express": "^5.2.1",
+    "googleapis": "^144.0.0",
     "lucide-react": "^0.469.0",
+    "mock-aws-s3": "^4.0.2",
+    "nock": "^14.0.10",
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
     "react-router-dom": "^6.28.0"
   },
   "devDependencies": {
+    "@types/bcrypt": "^5.0.2",
     "@types/better-sqlite3": "^7.6.12",
     "@types/node": "^22.7.4",
     "@types/react": "^18.2.64",

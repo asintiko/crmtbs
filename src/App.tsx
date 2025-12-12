@@ -9,8 +9,10 @@ import { SettingsPage } from '@/pages/Settings'
 import { StockPage } from '@/pages/Stock'
 import { ReservationsPage } from '@/pages/Reservations'
 import { ModelsStockPage } from '@/pages/ModelsStock'
+import { LoginPage } from '@/pages/Login'
 import { InventoryProvider } from '@/providers/InventoryProvider'
 import { ThemeProvider } from '@/providers/ThemeProvider'
+import { AuthProvider, useAuth } from '@/providers/AuthProvider'
 import { hasNativeApi } from '@/lib/api'
 
 const navItems: NavItem[] = [
@@ -23,25 +25,46 @@ const navItems: NavItem[] = [
   { label: 'Настройки', path: '/settings', icon: Settings },
 ]
 
+function ProtectedRoute({ children }: { children: React.ReactNode }) {
+  const { isAuthenticated, loading } = useAuth()
+  if (loading) return null
+  if (!isAuthenticated) {
+    return <Navigate to="/login" replace />
+  }
+  return <>{children}</>
+}
+
 function App() {
   return (
     <HashRouter>
-      <ThemeProvider>
-        <InventoryProvider>
-          <AppShell items={navItems} isDemo={!hasNativeApi}>
+      <AuthProvider>
+        <ThemeProvider>
+          <InventoryProvider>
             <Routes>
-              <Route path="/" element={<DashboardPage />} />
-              <Route path="/stock" element={<StockPage />} />
-              <Route path="/models-stock" element={<ModelsStockPage />} />
-              <Route path="/journal" element={<JournalPage />} />
-              <Route path="/reservations" element={<ReservationsPage />} />
-              <Route path="/catalog" element={<CatalogPage />} />
-              <Route path="/settings" element={<SettingsPage />} />
-              <Route path="*" element={<Navigate to="/" replace />} />
+              <Route path="/login" element={<LoginPage />} />
+              <Route
+                path="/*"
+                element={
+                  <ProtectedRoute>
+                    <AppShell items={navItems} isDemo={!hasNativeApi}>
+                      <Routes>
+                        <Route path="/" element={<DashboardPage />} />
+                        <Route path="/stock" element={<StockPage />} />
+                        <Route path="/models-stock" element={<ModelsStockPage />} />
+                        <Route path="/journal" element={<JournalPage />} />
+                        <Route path="/reservations" element={<ReservationsPage />} />
+                        <Route path="/catalog" element={<CatalogPage />} />
+                        <Route path="/settings" element={<SettingsPage />} />
+                        <Route path="*" element={<Navigate to="/" replace />} />
+                      </Routes>
+                    </AppShell>
+                  </ProtectedRoute>
+                }
+              />
             </Routes>
-          </AppShell>
-        </InventoryProvider>
-      </ThemeProvider>
+          </InventoryProvider>
+        </ThemeProvider>
+      </AuthProvider>
     </HashRouter>
   )
 }

@@ -1,6 +1,8 @@
 import fs from 'node:fs'
 import path from 'node:path'
+import crypto from 'node:crypto'
 import Database from 'better-sqlite3'
+import bcrypt from 'bcrypt'
 
 import type {
   DashboardSummary,
@@ -13,12 +15,20 @@ import type {
   ProductWithAliases,
   Reservation,
   Reminder,
+  LoginPayload,
+  CreateUserPayload,
+  UpdateUserPayload,
+  Session,
+  User,
+  SyncSnapshot,
   UpdateProductPayload,
   StockSnapshot,
+  OperationBundle,
 } from '../src/shared/types'
 
 type ProductRow = {
   id: number
+  user_id: number
   name: string
   sku: string | null
   model: string | null
@@ -32,6 +42,7 @@ type ProductRow = {
 
 type OperationRow = {
   id: number
+  user_id: number
   product_id: number
   type: string
   quantity: number
@@ -63,6 +74,7 @@ type OperationRow = {
 
 type ReservationRow = {
   id: number
+  user_id: number
   product_id: number
   quantity: number
   customer: string | null
@@ -77,12 +89,34 @@ type ReservationRow = {
 
 type ReminderRow = {
   id: number
+  user_id: number
   title: string
   message: string | null
   due_at: string
   done: number
   target_type: string | null
   target_id: number | null
+  created_at: string
+}
+
+type UserRow = {
+  id: number
+  username: string
+  password_hash: string
+  role: string
+  email: string | null
+  google_drive_folder_id: string | null
+  google_drive_client_id: string | null
+  google_drive_client_secret: string | null
+  created_at: string
+  updated_at: string
+}
+
+type SessionRow = {
+  id: number
+  user_id: number
+  token: string
+  expires_at: string
   created_at: string
 }
 
@@ -122,8 +156,31 @@ export class InventoryDatabase {
 
   private migrate() {
     this.db.exec(`
+      CREATE TABLE IF NOT EXISTS users (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        username TEXT UNIQUE NOT NULL,
+        password_hash TEXT NOT NULL,
+        role TEXT NOT NULL DEFAULT 'user',
+        email TEXT,
+        google_drive_folder_id TEXT,
+        google_drive_client_id TEXT,
+        google_drive_client_secret TEXT,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+      );
+
+      CREATE TABLE IF NOT EXISTS sessions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER NOT NULL,
+        token TEXT NOT NULL UNIQUE,
+        expires_at TEXT NOT NULL,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+      );
+
       CREATE TABLE IF NOT EXISTS products (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER NOT NULL DEFAULT 1,
         name TEXT NOT NULL,
         sku TEXT,
         model TEXT,
@@ -132,7 +189,8 @@ export class InventoryDatabase {
         notes TEXT,
         archived INTEGER DEFAULT 0,
         created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-        updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+        updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
       );
 
       CREATE TABLE IF NOT EXISTS aliases (
@@ -153,14 +211,17 @@ export class InventoryDatabase {
 
       CREATE TABLE IF NOT EXISTS bundles (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER NOT NULL DEFAULT 1,
         title TEXT,
         customer TEXT,
         note TEXT,
-        created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
       );
 
       CREATE TABLE IF NOT EXISTS reservations (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER NOT NULL DEFAULT 1,
         product_id INTEGER NOT NULL,
         quantity REAL NOT NULL,
         customer TEXT,
@@ -171,11 +232,13 @@ export class InventoryDatabase {
         link_code TEXT NOT NULL,
         created_at TEXT DEFAULT CURRENT_TIMESTAMP,
         updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
-        FOREIGN KEY(product_id) REFERENCES products(id) ON DELETE CASCADE
+        FOREIGN KEY(product_id) REFERENCES products(id) ON DELETE CASCADE,
+        FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
       );
 
       CREATE TABLE IF NOT EXISTS operations (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER NOT NULL DEFAULT 1,
         product_id INTEGER NOT NULL,
         type TEXT NOT NULL,
         quantity REAL NOT NULL,
@@ -191,23 +254,31 @@ export class InventoryDatabase {
         created_at TEXT DEFAULT CURRENT_TIMESTAMP,
         FOREIGN KEY(product_id) REFERENCES products(id) ON DELETE CASCADE,
         FOREIGN KEY(reservation_id) REFERENCES reservations(id) ON DELETE SET NULL,
-        FOREIGN KEY(bundle_id) REFERENCES bundles(id) ON DELETE SET NULL
+        FOREIGN KEY(bundle_id) REFERENCES bundles(id) ON DELETE SET NULL,
+        FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
       );
 
       CREATE TABLE IF NOT EXISTS reminders (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER NOT NULL DEFAULT 1,
         title TEXT NOT NULL,
         message TEXT,
         due_at TEXT NOT NULL,
         done INTEGER DEFAULT 0,
         target_type TEXT,
         target_id INTEGER,
-        created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
       );
 
       CREATE INDEX IF NOT EXISTS idx_operations_product_id ON operations(product_id);
       CREATE INDEX IF NOT EXISTS idx_aliases_product_id ON aliases(product_id);
       CREATE INDEX IF NOT EXISTS idx_reminders_due ON reminders(due_at);
+      CREATE INDEX IF NOT EXISTS idx_products_user ON products(user_id);
+      CREATE INDEX IF NOT EXISTS idx_operations_user ON operations(user_id);
+      CREATE INDEX IF NOT EXISTS idx_reservations_user ON reservations(user_id);
+      CREATE INDEX IF NOT EXISTS idx_bundles_user ON bundles(user_id);
+      CREATE INDEX IF NOT EXISTS idx_reminders_user ON reminders(user_id);
     `)
 
     const alterStatements = [
@@ -218,6 +289,14 @@ export class InventoryDatabase {
       "ALTER TABLE operations ADD COLUMN reservation_id INTEGER",
       "ALTER TABLE operations ADD COLUMN bundle_id INTEGER",
       "ALTER TABLE operations ADD COLUMN due_at TEXT",
+      "ALTER TABLE products ADD COLUMN user_id INTEGER DEFAULT 1",
+      "ALTER TABLE bundles ADD COLUMN user_id INTEGER DEFAULT 1",
+      "ALTER TABLE reservations ADD COLUMN user_id INTEGER DEFAULT 1",
+      "ALTER TABLE operations ADD COLUMN user_id INTEGER DEFAULT 1",
+      "ALTER TABLE reminders ADD COLUMN user_id INTEGER DEFAULT 1",
+      "ALTER TABLE users ADD COLUMN google_drive_folder_id TEXT",
+      "ALTER TABLE users ADD COLUMN google_drive_client_id TEXT",
+      "ALTER TABLE users ADD COLUMN google_drive_client_secret TEXT",
     ]
 
     for (const stmt of alterStatements) {
@@ -231,6 +310,7 @@ export class InventoryDatabase {
     const indexStatements = [
       'CREATE INDEX IF NOT EXISTS idx_operations_reservation ON operations(reservation_id)',
       'CREATE INDEX IF NOT EXISTS idx_operations_bundle ON operations(bundle_id)',
+      'CREATE INDEX IF NOT EXISTS idx_sessions_token ON sessions(token)',
     ]
 
     for (const stmt of indexStatements) {
@@ -240,16 +320,79 @@ export class InventoryDatabase {
         // ignore if index cannot be created
       }
     }
+
+    this.backfillDefaultUser()
   }
 
-  listProducts(): ProductSummary[] {
+  private backfillDefaultUser() {
+    try {
+      const hasUsersTable =
+        this.db
+          .prepare(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='users'",
+          )
+          .get() !== undefined
+      if (!hasUsersTable) return
+
+      let admin = this.db
+        .prepare('SELECT * FROM users WHERE role = ? ORDER BY id LIMIT 1')
+        .get('admin') as UserRow | undefined
+
+      if (!admin) {
+        const passwordHash = bcrypt.hashSync('admin', 10)
+        const now = new Date().toISOString()
+        const result = this.db
+          .prepare(
+            `INSERT INTO users (username, password_hash, role, created_at, updated_at)
+             VALUES (@username, @password_hash, 'admin', @created_at, @updated_at)`,
+          )
+          .run({
+            username: 'admin',
+            password_hash: passwordHash,
+            created_at: now,
+            updated_at: now,
+          })
+        const adminId = Number(result.lastInsertRowid)
+        admin = this.db.prepare('SELECT * FROM users WHERE id = ?').get(adminId) as UserRow
+      }
+
+      const adminId = admin?.id ?? 1
+      const tablesToBackfill = ['products', 'bundles', 'reservations', 'operations', 'reminders']
+      for (const table of tablesToBackfill) {
+        try {
+          this.db.prepare(`UPDATE ${table} SET user_id = ? WHERE user_id IS NULL`).run(adminId)
+          this.db.prepare(`UPDATE ${table} SET user_id = ? WHERE user_id = 0`).run(adminId)
+        } catch (error) {
+          // ignore if table does not have user_id yet
+        }
+      }
+    } catch (error) {
+      console.error('Failed to backfill default user', error)
+    }
+  }
+
+  private resolveUserId(userId?: number | null): number {
+    if (userId && userId > 0) return userId
+    const admin = this.db
+      .prepare('SELECT id FROM users WHERE role = ? ORDER BY id LIMIT 1')
+      .get('admin') as { id: number } | undefined
+    if (admin?.id) return admin.id
+    this.backfillDefaultUser()
+    const fallback = this.db
+      .prepare('SELECT id FROM users ORDER BY id LIMIT 1')
+      .get() as { id: number } | undefined
+    return fallback?.id ?? 1
+  }
+
+  listProducts(userId?: number): ProductSummary[] {
+    const ownerId = this.resolveUserId(userId)
     const products = this.db
-      .prepare('SELECT * FROM products ORDER BY archived ASC, name COLLATE NOCASE ASC')
-      .all() as ProductRow[]
+      .prepare('SELECT * FROM products WHERE user_id = ? ORDER BY archived ASC, name COLLATE NOCASE ASC')
+      .all(ownerId) as ProductRow[]
 
     const aliasesByProduct = this.loadAliases()
     const accessoriesByProduct = this.loadAccessories(products.map((p) => p.id))
-    const stockByProduct = this.getStockByProduct(products.map((p) => p.id))
+    const stockByProduct = this.getStockByProduct(products.map((p) => p.id), ownerId)
 
     return products.map((product) => {
       const mapped = this.mapProduct(product)
@@ -263,7 +406,8 @@ export class InventoryDatabase {
     })
   }
 
-  createProduct(payload: NewProductPayload): ProductSummary {
+  createProduct(payload: NewProductPayload, userId?: number): ProductSummary {
+    const ownerId = this.resolveUserId(userId)
     const now = new Date().toISOString()
     const name = payload.name.trim()
 
@@ -272,8 +416,8 @@ export class InventoryDatabase {
     }
 
     const insert = this.db.prepare(`
-      INSERT INTO products (name, sku, model, min_stock, has_import_permit, notes, archived, created_at, updated_at)
-      VALUES (@name, @sku, @model, @min_stock, @has_import_permit, @notes, 0, @created_at, @updated_at)
+      INSERT INTO products (name, sku, model, min_stock, has_import_permit, notes, archived, created_at, updated_at, user_id)
+      VALUES (@name, @sku, @model, @min_stock, @has_import_permit, @notes, 0, @created_at, @updated_at, @user_id)
     `)
 
     const result = insert.run({
@@ -285,6 +429,7 @@ export class InventoryDatabase {
       notes: payload.notes ?? null,
       created_at: now,
       updated_at: now,
+      user_id: ownerId,
     })
 
     const productId = Number(result.lastInsertRowid)
@@ -316,13 +461,17 @@ export class InventoryDatabase {
     }
   }
 
-  updateProduct(payload: UpdateProductPayload): ProductSummary {
+  updateProduct(payload: UpdateProductPayload, userId?: number): ProductSummary {
+    const ownerId = this.resolveUserId(userId)
     const product = this.db.prepare('SELECT * FROM products WHERE id = ?').get(payload.id) as
       | ProductRow
       | undefined
 
     if (!product) {
       throw new Error('Товар не найден')
+    }
+    if (product.user_id && product.user_id !== ownerId) {
+      throw new Error('Нет доступа к товару')
     }
 
     const name = payload.name?.trim() ?? product.name
@@ -387,11 +536,12 @@ export class InventoryDatabase {
       ...this.mapProduct(updated),
       aliases: this.loadAliases()[payload.id] ?? [],
       accessories: this.loadAccessories([payload.id])[payload.id] ?? [],
-      stock: this.getStockByProduct([payload.id])[payload.id] ?? emptyStock,
+      stock: this.getStockByProduct([payload.id], ownerId)[payload.id] ?? emptyStock,
     }
   }
 
-  listOperations(): OperationWithProduct[] {
+  listOperations(userId?: number): OperationWithProduct[] {
+    const ownerId = this.resolveUserId(userId)
     const rows = this.db
       .prepare(
         `
@@ -415,15 +565,17 @@ export class InventoryDatabase {
         LEFT JOIN products p ON p.id = o.product_id
         LEFT JOIN bundles b ON b.id = o.bundle_id
         LEFT JOIN reservations r ON r.id = o.reservation_id
+        WHERE o.user_id = @userId
         ORDER BY datetime(o.occurred_at) DESC, o.id DESC
       `,
       )
-      .all() as OperationRow[]
+      .all({ userId: ownerId }) as OperationRow[]
 
     return rows.map((row) => this.mapOperation(row))
   }
 
-  createOperation(payload: OperationInput): OperationWithProduct {
+  createOperation(payload: OperationInput, userId?: number): OperationWithProduct {
+    const ownerId = this.resolveUserId(userId)
     const product = this.db.prepare('SELECT * FROM products WHERE id = ?').get(payload.productId) as
       | ProductRow
       | undefined
@@ -434,6 +586,9 @@ export class InventoryDatabase {
 
     if (!allowedOperationTypes.includes(payload.type)) {
       throw new Error('Неизвестный тип операции')
+    }
+    if (product.user_id && product.user_id !== ownerId) {
+      throw new Error('Нет доступа к товару')
     }
 
     if (payload.quantity <= 0) {
@@ -446,7 +601,7 @@ export class InventoryDatabase {
     }
 
     if (payload.type === 'close_debt') {
-      const currentDebt = this.getCustomerDebt(payload.productId, customer)
+      const currentDebt = this.getCustomerDebt(payload.productId, customer, ownerId)
       if (currentDebt <= 0) {
         throw new Error('Долг для этого клиента отсутствует')
       }
@@ -475,8 +630,8 @@ export class InventoryDatabase {
     if (payload.type === 'reserve') {
       const linkCode = `BR-${Date.now().toString(36)}-${Math.floor(Math.random() * 1000)}`
       const insertReserve = this.db.prepare(`
-        INSERT INTO reservations (product_id, quantity, customer, contact, status, due_at, comment, link_code, created_at, updated_at)
-        VALUES (@product_id, @quantity, @customer, @contact, 'active', @due_at, @comment, @link_code, @created_at, @updated_at)
+        INSERT INTO reservations (product_id, quantity, customer, contact, status, due_at, comment, link_code, created_at, updated_at, user_id)
+        VALUES (@product_id, @quantity, @customer, @contact, 'active', @due_at, @comment, @link_code, @created_at, @updated_at, @user_id)
       `)
       const resResult = insertReserve.run({
         product_id: payload.productId,
@@ -488,6 +643,7 @@ export class InventoryDatabase {
         link_code: linkCode,
         created_at: now,
         updated_at: now,
+        user_id: ownerId,
       })
       reservationId = Number(resResult.lastInsertRowid)
     }
@@ -510,20 +666,21 @@ export class InventoryDatabase {
 
     if (!bundleId && bundleTitle) {
       const bundleInsert = this.db.prepare(
-        'INSERT INTO bundles (title, customer, note, created_at) VALUES (@title, @customer, @note, @created_at)',
+        'INSERT INTO bundles (title, customer, note, created_at, user_id) VALUES (@title, @customer, @note, @created_at, @user_id)',
       )
       const bundleResult = bundleInsert.run({
         title: bundleTitle,
         customer: customer || contact || null,
         note: payload.comment ?? null,
         created_at: now,
+        user_id: ownerId,
       })
       bundleId = Number(bundleResult.lastInsertRowid)
     }
 
     const insert = this.db.prepare(`
-      INSERT INTO operations (product_id, type, quantity, customer, contact, permit_number, paid, reservation_id, bundle_id, due_at, comment, occurred_at)
-      VALUES (@product_id, @type, @quantity, @customer, @contact, @permit_number, @paid, @reservation_id, @bundle_id, @due_at, @comment, @occurred_at)
+      INSERT INTO operations (product_id, type, quantity, customer, contact, permit_number, paid, reservation_id, bundle_id, due_at, comment, occurred_at, user_id)
+      VALUES (@product_id, @type, @quantity, @customer, @contact, @permit_number, @paid, @reservation_id, @bundle_id, @due_at, @comment, @occurred_at, @user_id)
     `)
 
     const result = insert.run({
@@ -539,6 +696,7 @@ export class InventoryDatabase {
       due_at: dueAt,
       comment: payload.comment ?? null,
       occurred_at: occurred,
+      user_id: ownerId,
     })
 
     this.db.prepare('UPDATE products SET updated_at = ? WHERE id = ?').run(occurred, payload.productId)
@@ -566,10 +724,10 @@ export class InventoryDatabase {
         LEFT JOIN products p ON p.id = o.product_id
         LEFT JOIN bundles b ON b.id = o.bundle_id
         LEFT JOIN reservations r ON r.id = o.reservation_id
-        WHERE o.id = ?
+        WHERE o.id = ? AND o.user_id = ?
       `,
       )
-      .get(result.lastInsertRowid) as OperationRow
+      .get(result.lastInsertRowid, ownerId) as OperationRow
 
     const operationResult = this.mapOperation(created)
 
@@ -609,17 +767,21 @@ export class InventoryDatabase {
         dueAt: reminderDate.toISOString(),
         targetType: 'operation',
         targetId: operationResult.id,
-      })
+      }, ownerId)
     }
 
     return operationResult
   }
 
-  deleteOperation(id: number): void {
+  deleteOperation(id: number, userId?: number): void {
+    const ownerId = this.resolveUserId(userId)
     const existing = this.db.prepare('SELECT * FROM operations WHERE id = ?').get(id) as
       | OperationRow
       | undefined
     if (!existing) return
+    if (existing.user_id && existing.user_id !== ownerId) {
+      throw new Error('Нет доступа к операции')
+    }
 
     this.db.prepare('DELETE FROM operations WHERE id = ?').run(id)
     this.db
@@ -627,15 +789,19 @@ export class InventoryDatabase {
       .run(new Date().toISOString(), existing.product_id)
   }
 
-  deleteProduct(id: number): void {
+  deleteProduct(id: number, userId?: number): void {
+    const ownerId = this.resolveUserId(userId)
     const product = this.db.prepare('SELECT * FROM products WHERE id = ?').get(id) as
       | ProductRow
       | undefined
     if (!product) return
+    if (product.user_id && product.user_id !== ownerId) {
+      throw new Error('Нет доступа к товару')
+    }
 
     const { count } = this.db
-      .prepare('SELECT COUNT(*) as count FROM operations WHERE product_id = ?')
-      .get(id) as { count: number }
+      .prepare('SELECT COUNT(*) as count FROM operations WHERE product_id = ? AND user_id = ?')
+      .get(id, ownerId) as { count: number }
 
     if (count > 0) {
       throw new Error('Товар используется в операциях и не может быть удален')
@@ -648,8 +814,9 @@ export class InventoryDatabase {
     remove(id)
   }
 
-  getDashboard(): DashboardSummary {
-    const products = this.listProducts()
+  getDashboard(userId?: number): DashboardSummary {
+    const ownerId = this.resolveUserId(userId)
+    const products = this.listProducts(ownerId)
     const lowStock = products.filter(
       (p) => !p.archived && p.minStock > 0 && p.stock.available < p.minStock,
     )
@@ -667,12 +834,12 @@ export class InventoryDatabase {
           END
         ) as debt
         FROM operations
-        WHERE customer IS NOT NULL
+        WHERE customer IS NOT NULL AND user_id = @userId
         GROUP BY product_id, customer
         HAVING debt > 0
       `,
         )
-        .all() as Array<{ productId: number; customer: string; debt: number }>) ?? []
+        .all({ userId: ownerId }) as Array<{ productId: number; customer: string; debt: number }>) ?? []
 
     const productMap = new Map(products.map((p) => [p.id, p]))
 
@@ -688,7 +855,8 @@ export class InventoryDatabase {
     }
   }
 
-  listReservations(): Reservation[] {
+  listReservations(userId?: number): Reservation[] {
+    const ownerId = this.resolveUserId(userId)
     const rows =
       (this.db
         .prepare(
@@ -696,10 +864,11 @@ export class InventoryDatabase {
         SELECT r.*, p.name as product_name, p.sku as product_sku
         FROM reservations r
         LEFT JOIN products p ON p.id = r.product_id
+        WHERE r.user_id = @userId
         ORDER BY datetime(r.due_at) ASC, r.id DESC
       `,
         )
-        .all() as Array<ReservationRow & { product_name: string; product_sku: string | null }>) ?? []
+        .all({ userId: ownerId }) as Array<ReservationRow & { product_name: string; product_sku: string | null }>) ?? []
 
     return rows.map((row) => {
       const status =
@@ -728,12 +897,16 @@ export class InventoryDatabase {
     })
   }
 
-  updateReservation(payload: Partial<Reservation> & { id: number }): Reservation {
+  updateReservation(payload: Partial<Reservation> & { id: number }, userId?: number): Reservation {
+    const ownerId = this.resolveUserId(userId)
     const existing = this.db
       .prepare('SELECT * FROM reservations WHERE id = ?')
       .get(payload.id) as ReservationRow | undefined
     if (!existing) {
       throw new Error('Бронь не найдена')
+    }
+    if (existing.user_id && existing.user_id !== ownerId) {
+      throw new Error('Нет доступа к брони')
     }
 
     const nextStatus = payload.status ?? existing.status
@@ -799,11 +972,12 @@ export class InventoryDatabase {
     }
   }
 
-  listReminders(): Reminder[] {
+  listReminders(userId?: number): Reminder[] {
+    const ownerId = this.resolveUserId(userId)
     const rows =
       (this.db
-        .prepare('SELECT * FROM reminders ORDER BY done ASC, datetime(due_at) ASC')
-        .all() as ReminderRow[]) ?? []
+        .prepare('SELECT * FROM reminders WHERE user_id = @userId ORDER BY done ASC, datetime(due_at) ASC')
+        .all({ userId: ownerId }) as ReminderRow[]) ?? []
 
     return rows.map((row) => ({
       id: row.id,
@@ -817,10 +991,11 @@ export class InventoryDatabase {
     }))
   }
 
-  createReminder(payload: Omit<Reminder, 'id' | 'done' | 'createdAt'>): Reminder {
+  createReminder(payload: Omit<Reminder, 'id' | 'done' | 'createdAt'>, userId?: number): Reminder {
+    const ownerId = this.resolveUserId(userId)
     const insert = this.db.prepare(`
-      INSERT INTO reminders (title, message, due_at, done, target_type, target_id, created_at)
-      VALUES (@title, @message, @due_at, 0, @target_type, @target_id, @created_at)
+      INSERT INTO reminders (title, message, due_at, done, target_type, target_id, created_at, user_id)
+      VALUES (@title, @message, @due_at, 0, @target_type, @target_id, @created_at, @user_id)
     `)
     const now = new Date().toISOString()
     const result = insert.run({
@@ -830,6 +1005,7 @@ export class InventoryDatabase {
       target_type: payload.targetType ?? null,
       target_id: payload.targetId ?? null,
       created_at: now,
+      user_id: ownerId,
     })
 
     return {
@@ -844,12 +1020,16 @@ export class InventoryDatabase {
     }
   }
 
-  updateReminder(payload: Partial<Reminder> & { id: number; done?: boolean }): Reminder {
+  updateReminder(payload: Partial<Reminder> & { id: number; done?: boolean }, userId?: number): Reminder {
+    const ownerId = this.resolveUserId(userId)
     const existing = this.db
       .prepare('SELECT * FROM reminders WHERE id = ?')
       .get(payload.id) as ReminderRow | undefined
     if (!existing) {
       throw new Error('Напоминание не найдено')
+    }
+    if (existing.user_id && existing.user_id !== ownerId) {
+      throw new Error('Нет доступа к напоминанию')
     }
 
     const update = this.db.prepare(`
@@ -1035,7 +1215,8 @@ export class InventoryDatabase {
     }
   }
 
-  private getCustomerDebt(productId: number, customer: string) {
+  private getCustomerDebt(productId: number, customer: string, userId?: number) {
+    const ownerId = this.resolveUserId(userId)
     if (!customer) return 0
 
     const row = this.db
@@ -1049,17 +1230,18 @@ export class InventoryDatabase {
         END
       ) as debt
       FROM operations
-      WHERE product_id = ? AND lower(trim(customer)) = lower(trim(?))
+      WHERE product_id = ? AND lower(trim(customer)) = lower(trim(?)) AND user_id = ?
     `,
       )
-      .get(productId, customer) as { debt: number | null } | undefined
+      .get(productId, customer, ownerId) as { debt: number | null } | undefined
 
     return row?.debt ?? 0
   }
 
-  private getStockByProduct(productIds?: number[]): Record<number, StockSnapshot> {
+  private getStockByProduct(productIds?: number[], userId?: number): Record<number, StockSnapshot> {
+    const ownerId = this.resolveUserId(userId)
     const filter = productIds?.length ? `WHERE product_id IN (${productIds.map(() => '?').join(',')})` : ''
-    const params = productIds?.length ? productIds : []
+    const params = productIds?.length ? [...productIds, ownerId] : [ownerId]
     const rows =
       (this.db
         .prepare(
@@ -1092,7 +1274,7 @@ export class InventoryDatabase {
             END
           ) as debt
         FROM operations
-        ${filter}
+        ${filter ? `${filter} AND user_id = ?` : 'WHERE user_id = ?'}
         GROUP BY product_id
       `,
         )
@@ -1121,5 +1303,410 @@ export class InventoryDatabase {
     }
 
     return stockByProduct
+  }
+
+  // ----- Users & Auth -----
+  login(payload: LoginPayload): { user: User; session: Session } {
+    const userRow = this.db
+      .prepare('SELECT * FROM users WHERE lower(username) = lower(?)')
+      .get(payload.username) as UserRow | undefined
+
+    if (!userRow) {
+      throw new Error('Неверный логин или пароль')
+    }
+
+    const valid = bcrypt.compareSync(payload.password, userRow.password_hash)
+    if (!valid) {
+      throw new Error('Неверный логин или пароль')
+    }
+
+    const session = this.createSession(userRow.id, 30)
+    return { user: this.mapUser(userRow), session }
+  }
+
+  createSession(userId: number, days = 30): Session {
+    const token = crypto.randomBytes(32).toString('hex')
+    const expiresAt = new Date(Date.now() + days * 24 * 60 * 60 * 1000).toISOString()
+    const now = new Date().toISOString()
+    const result = this.db
+      .prepare(
+        'INSERT INTO sessions (user_id, token, expires_at, created_at) VALUES (@user_id, @token, @expires_at, @created_at)',
+      )
+      .run({
+        user_id: userId,
+        token,
+        expires_at: expiresAt,
+        created_at: now,
+      })
+
+    return {
+      id: Number(result.lastInsertRowid),
+      userId,
+      token,
+      expiresAt,
+      createdAt: now,
+    }
+  }
+
+  getSessionByToken(token: string): Session | null {
+    if (!token) return null
+    const row = this.db.prepare('SELECT * FROM sessions WHERE token = ?').get(token) as SessionRow | undefined
+    if (!row) return null
+    return {
+      id: row.id,
+      userId: row.user_id,
+      token: row.token,
+      expiresAt: row.expires_at,
+      createdAt: row.created_at,
+    }
+  }
+
+  deleteSession(token: string) {
+    if (!token) return
+    this.db.prepare('DELETE FROM sessions WHERE token = ?').run(token)
+  }
+
+  getUserById(id: number): User | null {
+    const row = this.db.prepare('SELECT * FROM users WHERE id = ?').get(id) as UserRow | undefined
+    return row ? this.mapUser(row) : null
+  }
+
+  listUsers(): User[] {
+    const rows = this.db.prepare('SELECT * FROM users ORDER BY id ASC').all() as UserRow[]
+    return rows.map((row) => this.mapUser(row))
+  }
+
+  createUser(payload: CreateUserPayload): User {
+    const username = payload.username.trim()
+    if (!username) {
+      throw new Error('Имя пользователя обязательно')
+    }
+    if (!payload.password) {
+      throw new Error('Пароль обязателен')
+    }
+    const existing = this.db
+      .prepare('SELECT id FROM users WHERE lower(username) = lower(?)')
+      .get(username) as { id: number } | undefined
+    if (existing) {
+      throw new Error('Пользователь с таким именем уже существует')
+    }
+    const now = new Date().toISOString()
+    const passwordHash = bcrypt.hashSync(payload.password, 10)
+    const role = payload.role ?? 'user'
+    const result = this.db
+      .prepare(
+        `INSERT INTO users (username, password_hash, role, email, created_at, updated_at)
+         VALUES (@username, @password_hash, @role, @email, @created_at, @updated_at)`,
+      )
+      .run({
+        username,
+        password_hash: passwordHash,
+        role,
+        email: payload.email ?? null,
+        created_at: now,
+        updated_at: now,
+      })
+    return this.mapUser(
+      this.db.prepare('SELECT * FROM users WHERE id = ?').get(result.lastInsertRowid) as UserRow,
+    )
+  }
+
+  updateUser(payload: UpdateUserPayload): User {
+    const existing = this.db.prepare('SELECT * FROM users WHERE id = ?').get(payload.id) as UserRow | undefined
+    if (!existing) {
+      throw new Error('Пользователь не найден')
+    }
+
+    const nextUsername = payload.username?.trim() || existing.username
+    const nextPasswordHash = payload.password ? bcrypt.hashSync(payload.password, 10) : existing.password_hash
+    const nextRole = payload.role ?? existing.role
+    const nextEmail = payload.email ?? existing.email
+    const updatedAt = new Date().toISOString()
+
+    this.db
+      .prepare(
+        `UPDATE users
+         SET username = @username,
+             password_hash = @password_hash,
+             role = @role,
+             email = @email,
+             google_drive_folder_id = @google_drive_folder_id,
+             google_drive_client_id = @google_drive_client_id,
+             google_drive_client_secret = @google_drive_client_secret,
+             updated_at = @updated_at
+         WHERE id = @id`,
+      )
+      .run({
+        id: payload.id,
+        username: nextUsername,
+        password_hash: nextPasswordHash,
+        role: nextRole,
+        email: nextEmail ?? null,
+        google_drive_folder_id: payload.googleDriveFolderId ?? existing.google_drive_folder_id,
+        google_drive_client_id: payload.googleDriveClientId ?? existing.google_drive_client_id,
+        google_drive_client_secret: payload.googleDriveClientSecret ?? existing.google_drive_client_secret,
+        updated_at: updatedAt,
+      })
+
+    const row = this.db.prepare('SELECT * FROM users WHERE id = ?').get(payload.id) as UserRow
+    return this.mapUser(row)
+  }
+
+  deleteUser(id: number) {
+    const existing = this.db.prepare('SELECT * FROM users WHERE id = ?').get(id) as UserRow | undefined
+    if (!existing) return
+    if (existing.role === 'admin') {
+      const { admins } = this.db
+        .prepare("SELECT COUNT(*) as admins FROM users WHERE role = 'admin'")
+        .get() as { admins: number }
+      if (admins <= 1) {
+        throw new Error('Нельзя удалить последнего администратора')
+      }
+    }
+
+    this.db.prepare('DELETE FROM sessions WHERE user_id = ?').run(id)
+    this.db.prepare('DELETE FROM users WHERE id = ?').run(id)
+  }
+
+  getUserGoogleDriveConfig(userId: number) {
+    const user = this.db.prepare('SELECT * FROM users WHERE id = ?').get(userId) as UserRow | undefined
+    if (!user) return null
+    return {
+      clientId: user.google_drive_client_id,
+      clientSecret: user.google_drive_client_secret,
+      folderId: user.google_drive_folder_id,
+      accessToken: null,
+      refreshToken: null,
+    }
+  }
+
+  updateUserGoogleDriveConfig(userId: number, clientId: string | null, clientSecret: string | null, folderId?: string | null) {
+    const existing = this.db.prepare('SELECT * FROM users WHERE id = ?').get(userId) as UserRow | undefined
+    if (!existing) {
+      throw new Error('Пользователь не найден')
+    }
+
+    this.db
+      .prepare(
+        `UPDATE users
+         SET google_drive_client_id = @clientId,
+             google_drive_client_secret = @clientSecret,
+             google_drive_folder_id = @folderId,
+             updated_at = @updated_at
+         WHERE id = @id`,
+      )
+      .run({
+        id: userId,
+        clientId,
+        clientSecret,
+        folderId: folderId ?? existing.google_drive_folder_id,
+        updated_at: new Date().toISOString(),
+      })
+  }
+
+  exportSnapshot(includeUsers = false, userId?: number): SyncSnapshot {
+    const ownerId = this.resolveUserId(userId)
+    const snapshot: SyncSnapshot = {
+      products: this.listProducts(ownerId),
+      operations: this.listOperations(ownerId),
+      reservations: this.listReservations(ownerId),
+      reminders: this.listReminders(ownerId),
+      bundles: this.listBundles(ownerId),
+    }
+    if (includeUsers) {
+      const user = this.getUserById(ownerId)
+      snapshot.users = user ? [user] : []
+    }
+    return snapshot
+  }
+
+  importSnapshot(snapshot: SyncSnapshot, userId?: number) {
+    const ownerId = this.resolveUserId(userId)
+    const tx = this.db.transaction(() => {
+      // Clean previous data for this user
+      this.db.prepare('DELETE FROM operations WHERE user_id = ?').run(ownerId)
+      this.db.prepare('DELETE FROM reservations WHERE user_id = ?').run(ownerId)
+      this.db.prepare('DELETE FROM reminders WHERE user_id = ?').run(ownerId)
+      this.db.prepare('DELETE FROM product_accessories WHERE product_id IN (SELECT id FROM products WHERE user_id = ?)').run(ownerId)
+      this.db.prepare('DELETE FROM aliases WHERE product_id IN (SELECT id FROM products WHERE user_id = ?)').run(ownerId)
+      this.db.prepare('DELETE FROM bundles WHERE user_id = ?').run(ownerId)
+      this.db.prepare('DELETE FROM products WHERE user_id = ?').run(ownerId)
+
+      // Bundles
+      if (snapshot.bundles?.length) {
+        const insertBundle = this.db.prepare(
+          `INSERT OR REPLACE INTO bundles (id, user_id, title, customer, note, created_at)
+           VALUES (@id, @user_id, @title, @customer, @note, @created_at)`,
+        )
+        for (const bundle of snapshot.bundles) {
+          insertBundle.run({
+            id: bundle.id,
+            user_id: ownerId,
+            title: bundle.title ?? null,
+            customer: bundle.customer ?? null,
+            note: bundle.note ?? null,
+            created_at: bundle.createdAt ?? new Date().toISOString(),
+          })
+        }
+      }
+
+      // Products
+      const insertProduct = this.db.prepare(
+        `INSERT OR REPLACE INTO products (id, user_id, name, sku, model, min_stock, has_import_permit, notes, archived, created_at, updated_at)
+         VALUES (@id, @user_id, @name, @sku, @model, @min_stock, @has_import_permit, @notes, @archived, @created_at, @updated_at)`,
+      )
+      const insertAlias = this.db.prepare(
+        'INSERT INTO aliases (id, product_id, label) VALUES (@id, @product_id, @label)',
+      )
+      const insertAccessory = this.db.prepare(
+        'INSERT OR IGNORE INTO product_accessories (product_id, accessory_id) VALUES (@product_id, @accessory_id)',
+      )
+
+      for (const product of snapshot.products ?? []) {
+        insertProduct.run({
+          id: product.id,
+          user_id: ownerId,
+          name: product.name,
+          sku: product.sku ?? null,
+          model: product.model ?? null,
+          min_stock: product.minStock ?? 0,
+          has_import_permit: product.hasImportPermit ? 1 : 0,
+          notes: product.notes ?? null,
+          archived: product.archived ? 1 : 0,
+          created_at: product.createdAt ?? new Date().toISOString(),
+          updated_at: product.updatedAt ?? new Date().toISOString(),
+        })
+
+        if (product.aliases?.length) {
+          for (const alias of product.aliases) {
+            insertAlias.run({
+              id: alias.id,
+              product_id: product.id,
+              label: alias.label,
+            })
+          }
+        }
+        if (product.accessories?.length) {
+          for (const accessory of product.accessories) {
+            insertAccessory.run({
+              product_id: product.id,
+              accessory_id: accessory.accessoryId,
+            })
+          }
+        }
+      }
+
+      // Reservations
+      if (snapshot.reservations?.length) {
+        const insertReservation = this.db.prepare(
+          `INSERT OR REPLACE INTO reservations (id, user_id, product_id, quantity, customer, contact, status, due_at, comment, link_code, created_at, updated_at)
+           VALUES (@id, @user_id, @product_id, @quantity, @customer, @contact, @status, @due_at, @comment, @link_code, @created_at, @updated_at)`,
+        )
+        for (const res of snapshot.reservations) {
+          insertReservation.run({
+            id: res.id,
+            user_id: ownerId,
+            product_id: res.productId,
+            quantity: res.quantity,
+            customer: res.customer ?? null,
+            contact: res.contact ?? null,
+            status: res.status,
+            due_at: res.dueAt ?? null,
+            comment: res.comment ?? null,
+            link_code: res.linkCode,
+            created_at: res.createdAt ?? new Date().toISOString(),
+            updated_at: res.updatedAt ?? new Date().toISOString(),
+          })
+        }
+      }
+
+      // Operations
+      if (snapshot.operations?.length) {
+        const insertOperation = this.db.prepare(
+          `INSERT OR REPLACE INTO operations
+          (id, user_id, product_id, type, quantity, customer, contact, permit_number, paid, reservation_id, bundle_id, due_at, comment, occurred_at, created_at)
+          VALUES
+          (@id, @user_id, @product_id, @type, @quantity, @customer, @contact, @permit_number, @paid, @reservation_id, @bundle_id, @due_at, @comment, @occurred_at, @created_at)`,
+        )
+        for (const op of snapshot.operations) {
+          insertOperation.run({
+            id: op.id,
+            user_id: ownerId,
+            product_id: op.productId,
+            type: op.type,
+            quantity: op.quantity,
+            customer: op.customer ?? null,
+            contact: op.contact ?? null,
+            permit_number: op.permitNumber ?? null,
+            paid: op.paid ? 1 : 0,
+            reservation_id: op.reservationId ?? null,
+            bundle_id: op.bundleId ?? null,
+            due_at: op.dueAt ?? null,
+            comment: op.comment ?? null,
+            occurred_at: op.occurredAt,
+            created_at: op.createdAt ?? op.occurredAt ?? new Date().toISOString(),
+          })
+        }
+      }
+
+      // Reminders
+      if (snapshot.reminders?.length) {
+        const insertReminder = this.db.prepare(
+          `INSERT OR REPLACE INTO reminders (id, user_id, title, message, due_at, done, target_type, target_id, created_at)
+           VALUES (@id, @user_id, @title, @message, @due_at, @done, @target_type, @target_id, @created_at)`,
+        )
+        for (const reminder of snapshot.reminders) {
+          insertReminder.run({
+            id: reminder.id,
+            user_id: ownerId,
+            title: reminder.title,
+            message: reminder.message ?? null,
+            due_at: reminder.dueAt,
+            done: reminder.done ? 1 : 0,
+            target_type: reminder.targetType ?? null,
+            target_id: reminder.targetId ?? null,
+            created_at: reminder.createdAt ?? new Date().toISOString(),
+          })
+        }
+      }
+    })
+
+    tx()
+  }
+
+  private mapUser(row: UserRow): User {
+    return {
+      id: row.id,
+      username: row.username,
+      role: (row.role as User['role']) ?? 'user',
+      email: row.email ?? null,
+      googleDriveFolderId: row.google_drive_folder_id,
+      googleDriveClientId: row.google_drive_client_id,
+      googleDriveClientSecret: row.google_drive_client_secret,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+    }
+  }
+
+  private listBundles(userId?: number): OperationBundle[] {
+    const ownerId = this.resolveUserId(userId)
+    const rows =
+      (this.db
+        .prepare('SELECT * FROM bundles WHERE user_id = ? ORDER BY id DESC')
+        .all(ownerId) as Array<{
+          id: number
+          title: string | null
+          customer: string | null
+          note: string | null
+          created_at: string
+        }>) ?? []
+
+    return rows.map((row) => ({
+      id: row.id,
+      title: row.title,
+      customer: row.customer,
+      note: row.note,
+      createdAt: row.created_at,
+    }))
   }
 }

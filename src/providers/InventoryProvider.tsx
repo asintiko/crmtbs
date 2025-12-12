@@ -1,4 +1,4 @@
-import { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react'
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react'
 
 import { api, hasNativeApi } from '@/lib/api'
 import type {
@@ -11,6 +11,7 @@ import type {
   Reminder,
   UpdateProductPayload,
 } from '@shared/types'
+import { useAuth } from './AuthProvider'
 
 type InventoryContextValue = {
   products: ProductSummary[]
@@ -36,14 +37,25 @@ type InventoryContextValue = {
 const InventoryContext = createContext<InventoryContextValue | undefined>(undefined)
 
 export function InventoryProvider({ children }: { children: React.ReactNode }) {
+  const { isAuthenticated, magicLogin, loading: authLoading } = useAuth()
   const [products, setProducts] = useState<ProductSummary[]>([])
   const [operations, setOperations] = useState<OperationWithProduct[]>([])
-   const [reservations, setReservations] = useState<Reservation[]>([])
+  const [reservations, setReservations] = useState<Reservation[]>([])
   const [reminders, setReminders] = useState<Reminder[]>([])
   const [dashboard, setDashboard] = useState<DashboardSummary | null>(null)
   const [loading, setLoading] = useState(true)
+  const [initialized, setInitialized] = useState(false)
+  
+  // Используем ref для isAuthenticated чтобы избежать пересоздания refresh
+  const isAuthenticatedRef = useRef(isAuthenticated)
+  isAuthenticatedRef.current = isAuthenticated
 
   const refresh = useCallback(async () => {
+    // Для веб-версии требуется авторизация
+    if (!hasNativeApi && !isAuthenticatedRef.current) {
+      setLoading(false)
+      return
+    }
     setLoading(true)
     try {
       const [items, ops, dash, res, rem] = await Promise.all([
@@ -63,7 +75,7 @@ export function InventoryProvider({ children }: { children: React.ReactNode }) {
     } finally {
       setLoading(false)
     }
-  }, [])
+  }, []) // Убрали зависимости чтобы предотвратить пересоздание
 
   const createProduct = useCallback(
     async (payload: NewProductPayload) => {
@@ -178,9 +190,59 @@ export function InventoryProvider({ children }: { children: React.ReactNode }) {
     [refresh],
   )
 
+  // Инициализация при первом монтировании
   useEffect(() => {
-    void refresh()
-  }, [refresh])
+    let cancelled = false
+    const init = async () => {
+      // Ждём завершения проверки авторизации
+      if (authLoading) return
+      
+      if (!hasNativeApi && !isAuthenticated) {
+        // Для веб-версии: пытаемся magic token только один раз
+        const isLoginRoute = window.location.hash.includes('login')
+        if (!isLoginRoute && !initialized) {
+          const params = new URLSearchParams(window.location.search)
+          const magicToken = params.get('magic') || params.get('token') || import.meta.env.VITE_MAGIC_TOKEN
+          if (magicToken && magicLogin) {
+            try {
+              await magicLogin(magicToken)
+            } catch (error) {
+              console.error('Magic login failed', error)
+            }
+          }
+        }
+        setLoading(false)
+        setInitialized(true)
+        return
+      }
+      
+      if (!cancelled) {
+        setInitialized(true)
+        await refresh()
+      }
+    }
+    void init()
+    return () => {
+      cancelled = true
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [authLoading, isAuthenticated])
+  
+  // Обновление данных при изменении статуса авторизации (после инициализации)
+  useEffect(() => {
+    if (!initialized) return
+    if (isAuthenticated) {
+      void refresh()
+    } else {
+      // Очищаем данные при выходе
+      setProducts([])
+      setOperations([])
+      setReservations([])
+      setReminders([])
+      setDashboard(null)
+      setLoading(false)
+    }
+  }, [initialized, isAuthenticated, refresh])
 
   const value = useMemo<InventoryContextValue>(
     () => ({
