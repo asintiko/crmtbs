@@ -48,9 +48,14 @@
     "perMachine": false,
     "allowToChangeInstallationDirectory": true,
     "deleteAppDataOnUninstall": false,
-    "createDesktopShortcut": true,
+    "createDesktopShortcut": "always",
     "createStartMenuShortcut": true,
-    "shortcutName": "Inventory Desktop"
+    "shortcutName": "Inventory Desktop",
+    "installerIcon": null,
+    "uninstallerIcon": null,
+    "installerHeaderIcon": null,
+    "runAfterFinish": true,
+    "allowElevation": true
   },
   "linux": {
     "target": [
