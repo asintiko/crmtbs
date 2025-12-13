@@ -4,9 +4,7 @@
   "appId": "com.inventory.desktop",
   "asar": true,
   "asarUnpack": [
-    "**/*.node",
-    "**/better-sqlite3/**",
-    "**/bcrypt/**"
+    "**/*.node"
   ],
   "productName": "Inventory Desktop",
   "directories": {
@@ -14,15 +12,7 @@
   },
   "files": [
     "dist",
-    "dist-electron",
-    "node_modules/**/*"
-  ],
-  "extraResources": [
-    {
-      "from": "node_modules/better-sqlite3",
-      "to": "node_modules/better-sqlite3",
-      "filter": ["**/*"]
-    }
+    "dist-electron"
   ],
   "mac": {
     "target": [
