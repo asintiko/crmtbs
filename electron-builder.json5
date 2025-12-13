@@ -3,13 +3,26 @@
   "$schema": "https://raw.githubusercontent.com/electron-userland/electron-builder/master/packages/app-builder-lib/scheme.json",
   "appId": "com.inventory.desktop",
   "asar": true,
+  "asarUnpack": [
+    "**/*.node",
+    "**/better-sqlite3/**",
+    "**/bcrypt/**"
+  ],
   "productName": "Inventory Desktop",
   "directories": {
     "output": "release/${version}"
   },
   "files": [
     "dist",
-    "dist-electron"
+    "dist-electron",
+    "node_modules/**/*"
+  ],
+  "extraResources": [
+    {
+      "from": "node_modules/better-sqlite3",
+      "to": "node_modules/better-sqlite3",
+      "filter": ["**/*"]
+    }
   ],
   "mac": {
     "target": [
