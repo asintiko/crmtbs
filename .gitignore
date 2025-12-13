@@ -12,6 +12,8 @@ dist
 dist-ssr
 dist-electron
 release
+server-build/tsconfig.node.tsbuildinfo
+server-build/vite.config.*
 *.local
 create-electron-vite-*.tgz
 .tmp-cev

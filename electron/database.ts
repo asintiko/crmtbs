@@ -271,6 +271,19 @@ export class InventoryDatabase {
         FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
       );
 
+      CREATE TABLE IF NOT EXISTS audit_log (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER NOT NULL,
+        action_type TEXT NOT NULL,
+        entity_type TEXT NOT NULL,
+        entity_id INTEGER,
+        details TEXT,
+        ip_address TEXT,
+        user_agent TEXT,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+      );
+
       CREATE INDEX IF NOT EXISTS idx_operations_product_id ON operations(product_id);
       CREATE INDEX IF NOT EXISTS idx_aliases_product_id ON aliases(product_id);
       CREATE INDEX IF NOT EXISTS idx_reminders_due ON reminders(due_at);
@@ -279,6 +292,9 @@ export class InventoryDatabase {
       CREATE INDEX IF NOT EXISTS idx_reservations_user ON reservations(user_id);
       CREATE INDEX IF NOT EXISTS idx_bundles_user ON bundles(user_id);
       CREATE INDEX IF NOT EXISTS idx_reminders_user ON reminders(user_id);
+      CREATE INDEX IF NOT EXISTS idx_audit_log_user ON audit_log(user_id);
+      CREATE INDEX IF NOT EXISTS idx_audit_log_created ON audit_log(created_at);
+      CREATE INDEX IF NOT EXISTS idx_audit_log_entity ON audit_log(entity_type, entity_id);
     `)
 
     const alterStatements = [
@@ -297,6 +313,7 @@ export class InventoryDatabase {
       "ALTER TABLE users ADD COLUMN google_drive_folder_id TEXT",
       "ALTER TABLE users ADD COLUMN google_drive_client_id TEXT",
       "ALTER TABLE users ADD COLUMN google_drive_client_secret TEXT",
+      "ALTER TABLE sessions ADD COLUMN max_sessions INTEGER DEFAULT 5",
     ]
 
     for (const stmt of alterStatements) {
@@ -390,9 +407,10 @@ export class InventoryDatabase {
       .prepare('SELECT * FROM products WHERE user_id = ? ORDER BY archived ASC, name COLLATE NOCASE ASC')
       .all(ownerId) as ProductRow[]
 
-    const aliasesByProduct = this.loadAliases()
-    const accessoriesByProduct = this.loadAccessories(products.map((p) => p.id))
-    const stockByProduct = this.getStockByProduct(products.map((p) => p.id), ownerId)
+    const productIds = products.map((p) => p.id)
+    const aliasesByProduct = this.loadAliases(ownerId, productIds)
+    const accessoriesByProduct = this.loadAccessories(productIds, ownerId)
+    const stockByProduct = this.getStockByProduct(productIds, ownerId)
 
     return products.map((product) => {
       const mapped = this.mapProduct(product)
@@ -434,6 +452,9 @@ export class InventoryDatabase {
 
     const productId = Number(result.lastInsertRowid)
 
+    // Логируем операцию
+    this.logAuditEvent(ownerId, 'create', 'product', productId, JSON.stringify({ name, sku: payload.sku }))
+
     if (payload.aliases?.length) {
       const insertAlias = this.db.prepare(
         'INSERT INTO aliases (product_id, label) VALUES (@product_id, @label)',
@@ -449,14 +470,14 @@ export class InventoryDatabase {
     }
 
     if (payload.accessoryIds?.length) {
-      this.upsertAccessories(productId, payload.accessoryIds)
+      this.upsertAccessories(productId, payload.accessoryIds, ownerId)
     }
 
     const created = this.db.prepare('SELECT * FROM products WHERE id = ?').get(productId) as ProductRow
     return {
       ...this.mapProduct(created),
-      aliases: this.loadAliases()[productId] ?? [],
-      accessories: this.loadAccessories([productId])[productId] ?? [],
+      aliases: this.loadAliases(ownerId, [productId])[productId] ?? [],
+      accessories: this.loadAccessories([productId], ownerId)[productId] ?? [],
       stock: emptyStock,
     }
   }
@@ -471,6 +492,7 @@ export class InventoryDatabase {
       throw new Error('Товар не найден')
     }
     if (product.user_id && product.user_id !== ownerId) {
+      console.warn(`⚠️ Попытка обновления товара ${payload.id} пользователя ${product.user_id} от пользователя ${ownerId}`)
       throw new Error('Нет доступа к товару')
     }
 
@@ -528,14 +550,18 @@ export class InventoryDatabase {
     }
 
     if (payload.accessoryIds) {
-      this.upsertAccessories(payload.id, payload.accessoryIds)
+      this.upsertAccessories(payload.id, payload.accessoryIds, ownerId)
     }
 
     const updated = this.db.prepare('SELECT * FROM products WHERE id = ?').get(payload.id) as ProductRow
+    
+    // Логируем операцию
+    this.logAuditEvent(ownerId, 'update', 'product', payload.id, JSON.stringify({ changes: Object.keys(payload) }))
+    
     return {
       ...this.mapProduct(updated),
-      aliases: this.loadAliases()[payload.id] ?? [],
-      accessories: this.loadAccessories([payload.id])[payload.id] ?? [],
+      aliases: this.loadAliases(ownerId, [payload.id])[payload.id] ?? [],
+      accessories: this.loadAccessories([payload.id], ownerId)[payload.id] ?? [],
       stock: this.getStockByProduct([payload.id], ownerId)[payload.id] ?? emptyStock,
     }
   }
@@ -562,9 +588,9 @@ export class InventoryDatabase {
           r.created_at as reservation_created_at,
           r.updated_at as reservation_updated_at
         FROM operations o
-        LEFT JOIN products p ON p.id = o.product_id
-        LEFT JOIN bundles b ON b.id = o.bundle_id
-        LEFT JOIN reservations r ON r.id = o.reservation_id
+        LEFT JOIN products p ON p.id = o.product_id AND p.user_id = @userId
+        LEFT JOIN bundles b ON b.id = o.bundle_id AND b.user_id = @userId
+        LEFT JOIN reservations r ON r.id = o.reservation_id AND r.user_id = @userId
         WHERE o.user_id = @userId
         ORDER BY datetime(o.occurred_at) DESC, o.id DESC
       `,
@@ -588,6 +614,7 @@ export class InventoryDatabase {
       throw new Error('Неизвестный тип операции')
     }
     if (product.user_id && product.user_id !== ownerId) {
+      console.warn(`⚠️ Попытка создания операции для товара ${payload.productId} пользователя ${product.user_id} от пользователя ${ownerId}`)
       throw new Error('Нет доступа к товару')
     }
 
@@ -721,15 +748,18 @@ export class InventoryDatabase {
           r.created_at as reservation_created_at,
           r.updated_at as reservation_updated_at
         FROM operations o
-        LEFT JOIN products p ON p.id = o.product_id
-        LEFT JOIN bundles b ON b.id = o.bundle_id
-        LEFT JOIN reservations r ON r.id = o.reservation_id
+        LEFT JOIN products p ON p.id = o.product_id AND p.user_id = ?
+        LEFT JOIN bundles b ON b.id = o.bundle_id AND b.user_id = ?
+        LEFT JOIN reservations r ON r.id = o.reservation_id AND r.user_id = ?
         WHERE o.id = ? AND o.user_id = ?
       `,
       )
-      .get(result.lastInsertRowid, ownerId) as OperationRow
+      .get(ownerId, ownerId, ownerId, result.lastInsertRowid, ownerId) as OperationRow
 
     const operationResult = this.mapOperation(created)
+
+    // Логируем операцию
+    this.logAuditEvent(ownerId, 'create', 'operation', operationResult.id, JSON.stringify({ type: payload.type, productId: payload.productId, quantity: payload.quantity }))
 
     // Автоматическое создание напоминаний
     // 1. Если создана бронь с датой окончания - напомнить за день до
@@ -749,7 +779,7 @@ export class InventoryDatabase {
           dueAt: reminderDate.toISOString(),
           targetType: 'reservation',
           targetId: reservationId,
-        })
+        }, ownerId)
       }
     }
 
@@ -780,8 +810,12 @@ export class InventoryDatabase {
       | undefined
     if (!existing) return
     if (existing.user_id && existing.user_id !== ownerId) {
+      console.warn(`⚠️ Попытка удаления операции ${id} пользователя ${existing.user_id} от пользователя ${ownerId}`)
       throw new Error('Нет доступа к операции')
     }
+
+    // Логируем операцию
+    this.logAuditEvent(ownerId, 'delete', 'operation', id, JSON.stringify({ type: existing.type, productId: existing.product_id }))
 
     this.db.prepare('DELETE FROM operations WHERE id = ?').run(id)
     this.db
@@ -796,6 +830,7 @@ export class InventoryDatabase {
       | undefined
     if (!product) return
     if (product.user_id && product.user_id !== ownerId) {
+      console.warn(`⚠️ Попытка удаления товара ${id} пользователя ${product.user_id} от пользователя ${ownerId}`)
       throw new Error('Нет доступа к товару')
     }
 
@@ -806,6 +841,9 @@ export class InventoryDatabase {
     if (count > 0) {
       throw new Error('Товар используется в операциях и не может быть удален')
     }
+
+    // Логируем операцию перед удалением
+    this.logAuditEvent(ownerId, 'delete', 'product', id, JSON.stringify({ productName: product.name }))
 
     const remove = this.db.transaction((productId: number) => {
       this.db.prepare('DELETE FROM aliases WHERE product_id = ?').run(productId)
@@ -863,7 +901,7 @@ export class InventoryDatabase {
           `
         SELECT r.*, p.name as product_name, p.sku as product_sku
         FROM reservations r
-        LEFT JOIN products p ON p.id = r.product_id
+        LEFT JOIN products p ON p.id = r.product_id AND p.user_id = @userId
         WHERE r.user_id = @userId
         ORDER BY datetime(r.due_at) ASC, r.id DESC
       `,
@@ -906,6 +944,7 @@ export class InventoryDatabase {
       throw new Error('Бронь не найдена')
     }
     if (existing.user_id && existing.user_id !== ownerId) {
+      console.warn(`⚠️ Попытка обновления брони ${payload.id} пользователя ${existing.user_id} от пользователя ${ownerId}`)
       throw new Error('Нет доступа к брони')
     }
 
@@ -937,7 +976,7 @@ export class InventoryDatabase {
         `
         SELECT r.*, p.name as product_name, p.sku as product_sku
         FROM reservations r
-        LEFT JOIN products p ON p.id = r.product_id
+        LEFT JOIN products p ON p.id = r.product_id AND p.user_id = r.user_id
         WHERE r.id = ?
       `,
       )
@@ -1029,6 +1068,7 @@ export class InventoryDatabase {
       throw new Error('Напоминание не найдено')
     }
     if (existing.user_id && existing.user_id !== ownerId) {
+      console.warn(`⚠️ Попытка обновления напоминания ${payload.id} пользователя ${existing.user_id} от пользователя ${ownerId}`)
       throw new Error('Нет доступа к напоминанию')
     }
 
@@ -1069,8 +1109,22 @@ export class InventoryDatabase {
     }
   }
 
-  private loadAliases(): Record<number, ProductAlias[]> {
-    const rows = this.db.prepare('SELECT * FROM aliases').all() as Array<{
+  private loadAliases(userId?: number, productIds?: number[]): Record<number, ProductAlias[]> {
+    const ownerId = this.resolveUserId(userId)
+    let query = `
+      SELECT a.id, a.product_id, a.label
+      FROM aliases a
+      INNER JOIN products p ON p.id = a.product_id
+      WHERE p.user_id = ?
+    `
+    const params: any[] = [ownerId]
+    
+    if (productIds?.length) {
+      query += ` AND a.product_id IN (${productIds.map(() => '?').join(',')})`
+      params.push(...productIds)
+    }
+    
+    const rows = this.db.prepare(query).all(...params) as Array<{
       id: number
       product_id: number
       label: string
@@ -1087,19 +1141,25 @@ export class InventoryDatabase {
     }, {})
   }
 
-  private loadAccessories(productIds?: number[]): Record<number, ProductAccessory[]> {
-    const filter = productIds?.length ? `WHERE pa.product_id IN (${productIds.map(() => '?').join(',')})` : ''
-    const params = productIds?.length ? productIds : []
+  private loadAccessories(productIds?: number[], userId?: number): Record<number, ProductAccessory[]> {
+    const ownerId = this.resolveUserId(userId)
+    let query = `
+      SELECT pa.id, pa.product_id, pa.accessory_id, p.name as accessory_name, p.sku as accessory_sku
+      FROM product_accessories pa
+      INNER JOIN products p_product ON p_product.id = pa.product_id
+      LEFT JOIN products p ON p.id = pa.accessory_id AND p.user_id = ?
+      WHERE p_product.user_id = ?
+    `
+    const params: any[] = [ownerId, ownerId]
+    
+    if (productIds?.length) {
+      query += ` AND pa.product_id IN (${productIds.map(() => '?').join(',')})`
+      params.push(...productIds)
+    }
+    
     const rows =
       (this.db
-        .prepare(
-          `
-        SELECT pa.id, pa.product_id, pa.accessory_id, p.name as accessory_name, p.sku as accessory_sku
-        FROM product_accessories pa
-        LEFT JOIN products p ON p.id = pa.accessory_id
-        ${filter}
-      `,
-        )
+        .prepare(query)
         .all(...params) as Array<{
           id: number
           product_id: number
@@ -1121,7 +1181,35 @@ export class InventoryDatabase {
     }, {})
   }
 
-  private upsertAccessories(productId: number, accessoryIds: number[]) {
+  private upsertAccessories(productId: number, accessoryIds: number[], userId?: number) {
+    const ownerId = this.resolveUserId(userId)
+    
+    // Проверяем, что productId принадлежит пользователю
+    const product = this.db.prepare('SELECT user_id FROM products WHERE id = ?').get(productId) as { user_id: number } | undefined
+    if (!product || product.user_id !== ownerId) {
+      throw new Error('Нет доступа к товару')
+    }
+    
+    // Проверяем, что все accessoryIds принадлежат тому же пользователю
+    if (accessoryIds.length > 0) {
+      const placeholders = accessoryIds.map(() => '?').join(',')
+      const accessories = this.db
+        .prepare(`SELECT id, user_id FROM products WHERE id IN (${placeholders})`)
+        .all(...accessoryIds) as Array<{ id: number; user_id: number }>
+      
+      const invalidAccessories = accessories.filter(a => a.user_id !== ownerId)
+      if (invalidAccessories.length > 0) {
+        throw new Error('Некоторые аксессуары принадлежат другому пользователю')
+      }
+      
+      // Проверяем, что все переданные accessoryIds найдены в БД
+      const foundIds = new Set(accessories.map(a => a.id))
+      const missingIds = accessoryIds.filter(id => !foundIds.has(id))
+      if (missingIds.length > 0) {
+        throw new Error('Некоторые аксессуары не найдены')
+      }
+    }
+    
     const uniqueIds = Array.from(new Set(accessoryIds.filter((id) => id !== productId)))
     const removeStmt = this.db.prepare('DELETE FROM product_accessories WHERE product_id = ?')
     const insertStmt = this.db.prepare(`
@@ -1306,21 +1394,27 @@ export class InventoryDatabase {
   }
 
   // ----- Users & Auth -----
-  login(payload: LoginPayload): { user: User; session: Session } {
+  login(payload: LoginPayload, ipAddress?: string, userAgent?: string): { user: User; session: Session } {
     const userRow = this.db
       .prepare('SELECT * FROM users WHERE lower(username) = lower(?)')
       .get(payload.username) as UserRow | undefined
 
     if (!userRow) {
+      this.logAuditEvent(0, 'login_failed', 'user', null, JSON.stringify({ username: payload.username, reason: 'user_not_found' }), ipAddress, userAgent)
       throw new Error('Неверный логин или пароль')
     }
 
     const valid = bcrypt.compareSync(payload.password, userRow.password_hash)
     if (!valid) {
+      this.logAuditEvent(userRow.id, 'login_failed', 'user', userRow.id, JSON.stringify({ username: payload.username, reason: 'invalid_password' }), ipAddress, userAgent)
       throw new Error('Неверный логин или пароль')
     }
 
     const session = this.createSession(userRow.id, 30)
+    
+    // Логируем успешный вход
+    this.logAuditEvent(userRow.id, 'login', 'user', userRow.id, JSON.stringify({ username: payload.username }), ipAddress, userAgent)
+    
     return { user: this.mapUser(userRow), session }
   }
 
@@ -1364,6 +1458,47 @@ export class InventoryDatabase {
   deleteSession(token: string) {
     if (!token) return
     this.db.prepare('DELETE FROM sessions WHERE token = ?').run(token)
+  }
+
+  refreshSession(token: string, days = 30): Session | null {
+    const session = this.getSessionByToken(token)
+    if (!session) return null
+
+    // Обновляем срок действия сессии
+    const newExpiresAt = new Date(Date.now() + days * 24 * 60 * 60 * 1000).toISOString()
+    this.db
+      .prepare('UPDATE sessions SET expires_at = ? WHERE token = ?')
+      .run(newExpiresAt, token)
+
+    return {
+      ...session,
+      expiresAt: newExpiresAt,
+    }
+  }
+
+  logAuditEvent(
+    userId: number,
+    actionType: string,
+    entityType: string,
+    entityId: number | null = null,
+    details: string | null = null,
+    ipAddress: string | null = null,
+    userAgent: string | null = null,
+  ) {
+    this.db
+      .prepare(
+        'INSERT INTO audit_log (user_id, action_type, entity_type, entity_id, details, ip_address, user_agent, created_at) VALUES (@user_id, @action_type, @entity_type, @entity_id, @details, @ip_address, @user_agent, @created_at)',
+      )
+      .run({
+        user_id: userId,
+        action_type: actionType,
+        entity_type: entityType,
+        entity_id: entityId,
+        details: details,
+        ip_address: ipAddress,
+        user_agent: userAgent,
+        created_at: new Date().toISOString(),
+      })
   }
 
   getUserById(id: number): User | null {
@@ -1587,6 +1722,21 @@ export class InventoryDatabase {
           }
         }
         if (product.accessories?.length) {
+          // Проверяем, что все аксессуары принадлежат тому же пользователю
+          const accessoryIds = product.accessories.map(a => a.accessoryId)
+          if (accessoryIds.length > 0) {
+            const placeholders = accessoryIds.map(() => '?').join(',')
+            const accessories = this.db
+              .prepare(`SELECT id, user_id FROM products WHERE id IN (${placeholders})`)
+              .all(...accessoryIds) as Array<{ id: number; user_id: number }>
+            
+            const invalidAccessories = accessories.filter(a => a.user_id !== ownerId)
+            if (invalidAccessories.length > 0) {
+              console.warn(`⚠️ Пропущены аксессуары другого пользователя при импорте для продукта ${product.id}`)
+              continue // Пропускаем этот продукт
+            }
+          }
+          
           for (const accessory of product.accessories) {
             insertAccessory.run({
               product_id: product.id,

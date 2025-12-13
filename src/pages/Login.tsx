@@ -51,6 +51,7 @@ export function LoginPage() {
               </label>
               <input
                 type="text"
+                autoFocus
                 required
                 value={form.username}
                 onChange={(e) => setForm((prev) => ({ ...prev, username: e.target.value }))}

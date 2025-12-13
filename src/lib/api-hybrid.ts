@@ -139,6 +139,17 @@ export const hybridApi: InventoryAPI = {
       return currentUser
     }
   },
+
+  refreshSession: async (token) => {
+    if (webApi.refreshSession) {
+      return await webApi.refreshSession(token)
+    }
+    // Fallback для Electron
+    if (typeof window !== 'undefined' && window.api?.refreshSession) {
+      return await window.api.refreshSession(token)
+    }
+    return null
+  },
   
   // ===== USERS =====
   listUsers: async () => {

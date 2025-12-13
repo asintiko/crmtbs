@@ -26,21 +26,15 @@
     "entitlementsInherit": "build/entitlements.mac.plist"
   },
   "win": {
+    "icon": "build/logo1.ico",
     "target": [
       {
         "target": "nsis",
         "arch": [
           "x64"
         ]
-      },
-      {
-        "target": "portable",
-        "arch": [
-          "x64"
-        ]
       }
     ],
-    "artifactName": "${productName}-Windows-${version}-Setup.${ext}",
     "sign": null
   },
   "nsis": {
@@ -51,11 +45,15 @@
     "createDesktopShortcut": "always",
     "createStartMenuShortcut": true,
     "shortcutName": "Inventory Desktop",
-    "installerIcon": null,
-    "uninstallerIcon": null,
-    "installerHeaderIcon": null,
+    "installerIcon": "build/logo1.ico",
+    "uninstallerIcon": "build/logo1.ico",
+    "installerHeaderIcon": "build/logo1.ico",
     "runAfterFinish": true,
-    "allowElevation": true
+    "allowElevation": true,
+    "artifactName": "${productName}-Windows-${version}-Setup.${ext}"
+  },
+  "portable": {
+    "artifactName": "${productName}-Windows-${version}-Portable.${ext}"
   },
   "linux": {
     "target": [

@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import { useNavigate } from 'react-router-dom'
 import { Bell, Check, Copy, DownloadCloud, Folder, Info, MoonStar, SunMedium, RefreshCw, ExternalLink, Trash2 } from 'lucide-react'
 
 import { Card, CardContent, CardHeader } from '@/components/Card'
@@ -11,6 +12,7 @@ import { formatDate } from '@/lib/formatters'
 import { useAuth } from '@/providers/AuthProvider'
 
 export function SettingsPage() {
+  const navigate = useNavigate()
   const [paths, setPaths] = useState<AppPaths | null>(null)
   const [backupStatus, setBackupStatus] = useState<string | null>(null)
   const [showReminderForm, setShowReminderForm] = useState(false)
@@ -20,7 +22,7 @@ export function SettingsPage() {
   const [userForm, setUserForm] = useState({ username: '', password: '', role: 'user' as UserRole })
   const [userError, setUserError] = useState<string | null>(null)
   const { reminders, createReminder, updateReminder } = useInventory()
-  const { isAdmin, refresh: refreshUser, user } = useAuth()
+  const { isAdmin, refresh: refreshUser, user, switchUser } = useAuth()
 
   useEffect(() => {
     api
@@ -215,6 +217,38 @@ export function SettingsPage() {
           </CardContent>
         </Card>
       )}
+
+      <Card>
+        <CardHeader
+          title="Аккаунт"
+          action={
+            <button
+              type="button"
+              onClick={async () => {
+                if (confirm('Вы уверены, что хотите выйти из текущего аккаунта?')) {
+                  await switchUser()
+                  navigate('/login', { replace: true })
+                }
+              }}
+              className="inline-flex items-center gap-2 rounded-lg bg-rose-500 px-3 py-2 text-xs font-semibold text-white shadow-sm transition hover:bg-rose-600"
+            >
+              Сменить пользователя
+            </button>
+          }
+        />
+        <CardContent>
+          <div className="space-y-3 text-sm text-slate-600 dark:text-slate-300">
+            <div className="flex items-center justify-between rounded-xl border border-slate-200 px-3 py-2 dark:border-slate-800">
+              <span className="font-semibold text-slate-900 dark:text-white">Текущий пользователь:</span>
+              <span className="text-slate-600 dark:text-slate-300">{user?.username ?? '—'}</span>
+            </div>
+            <div className="flex items-center justify-between rounded-xl border border-slate-200 px-3 py-2 dark:border-slate-800">
+              <span className="font-semibold text-slate-900 dark:text-white">Роль:</span>
+              <span className="text-slate-600 dark:text-slate-300">{user?.role === 'admin' ? 'Администратор' : 'Пользователь'}</span>
+            </div>
+          </div>
+        </CardContent>
+      </Card>
 
       <Card>
         <CardHeader

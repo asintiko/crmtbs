@@ -9,6 +9,7 @@ type AuthContextValue = {
   magicLogin?: (token: string) => Promise<void>
   logout: () => Promise<void>
   refresh: () => Promise<void>
+  switchUser: () => Promise<void>
   isAuthenticated: boolean
   isAdmin: boolean
 }
@@ -65,13 +66,15 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       const token = localStorage.getItem(SESSION_TOKEN_KEY)
       if (token) {
         await api.logout()
-        localStorage.removeItem(SESSION_TOKEN_KEY)
       }
+      localStorage.removeItem(SESSION_TOKEN_KEY)
       setUser(null)
     } catch (error) {
       console.error('Ошибка при выходе', error)
       localStorage.removeItem(SESSION_TOKEN_KEY)
       setUser(null)
+    } finally {
+      setLoading(false)
     }
   }, [])
 
@@ -105,6 +108,54 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     }
   }, [])
 
+  const switchUser = useCallback(async () => {
+    // Выходим из текущей сессии
+    await logout()
+    // Очищаем состояние
+    setUser(null)
+    localStorage.removeItem(SESSION_TOKEN_KEY)
+  }, [logout])
+
+  // Автоматическое обновление токена каждые 24 часа
+  useEffect(() => {
+    if (!user) return
+
+    const token = localStorage.getItem(SESSION_TOKEN_KEY)
+    if (!token) return
+
+    // Проверяем и обновляем токен каждые 24 часа
+    const refreshInterval = setInterval(async () => {
+      try {
+        if (api.refreshSession) {
+          const refreshed = await api.refreshSession(token)
+          if (refreshed) {
+            localStorage.setItem(SESSION_TOKEN_KEY, refreshed.token)
+            const currentUser = await api.getCurrentUser()
+            if (currentUser) {
+              setUser(currentUser)
+            }
+          } else {
+            // Токен истек, выходим
+            await logout()
+          }
+        } else {
+          // Fallback: просто проверяем сессию
+          const currentUser = await api.getCurrentUser()
+          if (currentUser) {
+            setUser(currentUser)
+          } else {
+            await logout()
+          }
+        }
+      } catch (error) {
+        console.error('Ошибка при обновлении токена', error)
+        await logout()
+      }
+    }, 24 * 60 * 60 * 1000) // 24 часа
+
+    return () => clearInterval(refreshInterval)
+  }, [user, logout])
+
   useEffect(() => {
     void checkSession()
   }, [checkSession])
@@ -117,10 +168,11 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       magicLogin,
       logout,
       refresh,
+      switchUser,
       isAuthenticated: Boolean(user),
       isAdmin: user?.role === 'admin',
     }),
-    [user, loading, login, magicLogin, logout, refresh],
+    [user, loading, login, magicLogin, logout, refresh, switchUser],
   )
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>

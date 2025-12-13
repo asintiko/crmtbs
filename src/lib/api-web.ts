@@ -108,6 +108,13 @@ export const webApi: InventoryAPI = {
     return result.user
   },
 
+  refreshSession: async (token: string) => {
+    setAuthToken(token)
+    // Для веб-версии просто проверяем сессию, обновление происходит автоматически
+    const result = await request<{ user: User }>('/auth/me')
+    return result.user ? { token, expiresAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString() } : null
+  },
+
   // Users
   listUsers: async () => {
     return request<User[]>('/users')

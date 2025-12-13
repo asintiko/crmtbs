@@ -115,7 +115,7 @@ export function OperationForm({
   initialProductId,
   initialType,
 }: Props) {
-  const { products, operations, createOperation } = useInventory()
+  const { products, operations, createOperation, createProduct } = useInventory()
 
   const [query, setQuery] = useState('')
   const [selected, setSelected] = useState<ProductSummary | null>(null)
@@ -245,11 +245,6 @@ export function OperationForm({
     e.preventDefault()
     setError(null)
 
-    if (!selectedProduct) {
-      setError('Выберите товар')
-      return
-    }
-
     if (!quantityNumber || quantityNumber <= 0 || Number.isNaN(quantityNumber)) {
       setError('Укажите корректное количество')
       return
@@ -260,23 +255,50 @@ export function OperationForm({
       return
     }
 
-    if (type === 'close_debt') {
-      const debtValue = currentDebt ?? 0
-      if (debtValue <= 0) {
-        setError('Долг для этого клиента отсутствует')
-        return
-      }
-      if (quantityNumber > debtValue) {
-        setError('Сумма погашения превышает остаток долга')
-        return
-      }
-    }
+    let productToUse = selectedProduct
+    const needAutoCreate = !productToUse && normalizedQuery && matches.length === 0
 
     setSubmitting(true)
-    const occurredAt = date ? new Date(date).toISOString() : new Date().toISOString()
     try {
+      if (needAutoCreate) {
+        const created = await createProduct({ name: normalizedQuery })
+        if (!created) {
+          throw new Error('Не удалось автоматически создать товар')
+        }
+        productToUse = created
+        setSelected(created)
+      } else if (!productToUse) {
+        throw new Error('Выберите товар')
+      }
+
+      const productId = productToUse?.id
+      if (!productId) {
+        throw new Error('Выберите товар')
+      }
+
+      let debtValue = currentDebt ?? 0
+      if (type === 'close_debt') {
+        debtValue = operations.reduce((acc, op) => {
+          if (op.productId !== productId) return acc
+          if (!op.customer) return acc
+          if (op.customer.trim().toLowerCase() !== customerKey) return acc
+          if (op.type === 'ship_on_credit') return acc + op.quantity
+          if (op.type === 'close_debt') return acc - op.quantity
+          return acc
+        }, 0)
+
+        debtValue = Math.max(debtValue, 0)
+        if (debtValue <= 0) {
+          throw new Error('Долг для этого клиента отсутствует')
+        }
+        if (quantityNumber > debtValue) {
+          throw new Error('Сумма погашения превышает остаток долга')
+        }
+      }
+
+      const occurredAt = date ? new Date(date).toISOString() : new Date().toISOString()
       await createOperation({
-        productId: selectedProduct.id,
+        productId: productId,
         type,
         quantity: quantityNumber,
         customer: customerValue || undefined,

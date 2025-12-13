@@ -1,6 +1,7 @@
 import path from 'node:path'
 import fs from 'node:fs'
 import https from 'node:https'
+import http from 'node:http'
 import { spawn } from 'node:child_process'
 import { createRequire } from 'node:module'
 import { fileURLToPath } from 'node:url'
@@ -62,7 +63,7 @@ if (!isElectronRuntime) {
 }
 
 async function bootstrap() {
-  const { app, BrowserWindow, ipcMain, Tray, Notification, nativeImage } = require('electron') as typeof import('electron')
+  const { app, BrowserWindow, ipcMain, Tray, Notification, nativeImage, Menu } = require('electron') as typeof import('electron')
 
   const getDbPath = () => path.join(app.getPath('userData'), 'inventory.db')
   const getBackupDir = () => path.join(app.getPath('documents'), 'InventoryBackups')
@@ -80,11 +81,16 @@ async function bootstrap() {
       minWidth: 1080,
       minHeight: 720,
       backgroundColor: '#0f172a',
-      icon: path.join(process.env.VITE_PUBLIC, 'electron-vite.svg'),
+      icon: path.join(process.env.VITE_PUBLIC, 'logo1.png'),
       webPreferences: {
         preload: path.join(__dirname, 'preload.mjs'),
       },
+      autoHideMenuBar: true,
     })
+
+    Menu.setApplicationMenu(null)
+    win.setMenuBarVisibility(false)
+    win.removeMenu()
 
     if (VITE_DEV_SERVER_URL) {
       win.loadURL(VITE_DEV_SERVER_URL)
@@ -100,7 +106,7 @@ async function bootstrap() {
   }
 
   function createTray() {
-    const iconPath = path.join(process.env.VITE_PUBLIC ?? __dirname, 'electron-vite.svg')
+    const iconPath = path.join(process.env.VITE_PUBLIC ?? __dirname, 'logo1.png')
     let icon = null
     try {
       if (fs.existsSync(iconPath)) {
@@ -134,16 +140,23 @@ async function bootstrap() {
 
   const checkReminders = () => {
     if (!db) return
-    const reminders = db.listReminders().filter((r) => !r.done)
-    const now = Date.now()
-    for (const reminder of reminders) {
-      if (new Date(reminder.dueAt).getTime() <= now) {
-        const notif = new Notification({
-          title: reminder.title,
-          body: reminder.message ?? 'Напоминание',
-        })
-        notif.show()
-        db.updateReminder({ id: reminder.id, done: true })
+    // Проверяем напоминания для всех пользователей
+    const users = db.listUsers()
+    for (const user of users) {
+      const reminders = db.listReminders(user.id).filter((r) => !r.done)
+      const now = Date.now()
+      for (const reminder of reminders) {
+        if (new Date(reminder.dueAt).getTime() <= now) {
+          const notif = new Notification({
+            title: reminder.title,
+            body: reminder.message ?? 'Напоминание',
+          })
+          notif.show()
+          db.updateReminder({ id: reminder.id, done: true }, user.id)
+          // #region agent log
+          logDebug('electron/main.ts:checkReminders', 'Reminder notification shown', { userId: user.id, reminderId: reminder.id }, 'C')
+          // #endregion
+        }
       }
     }
   }
@@ -244,59 +257,302 @@ async function bootstrap() {
     })
   }
 
+  // Helper функция для логирования (использует Node.js http)
+  function logDebug(location: string, message: string, data: any, hypothesisId: string = 'A') {
+    try {
+      const logData = JSON.stringify({
+        location,
+        message,
+        data,
+        timestamp: Date.now(),
+        sessionId: 'debug-session',
+        runId: 'multi-user',
+        hypothesisId,
+      })
+      const url = new URL('http://127.0.0.1:7242/ingest/d0d7972b-8c29-47b4-9fc7-6bb593f6abb2')
+      const options = {
+        hostname: url.hostname,
+        port: url.port,
+        path: url.pathname,
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Content-Length': Buffer.byteLength(logData),
+        },
+      }
+      const req = http.request(options, () => {})
+      req.on('error', () => {}) // Игнорируем ошибки логирования
+      req.write(logData)
+      req.end()
+    } catch (error) {
+      // Игнорируем ошибки логирования
+    }
+  }
+
+  // Helper функция для получения userId из токена сессии
+  function getUserIdFromToken(token: string | null | undefined): number | null {
+    if (!db || !token) {
+      // #region agent log
+      logDebug('electron/main.ts:getUserIdFromToken', 'Token is null or db is null', { hasToken: !!token, hasDb: !!db }, 'A')
+      // #endregion
+      return null
+    }
+    try {
+      const session = db.getSessionByToken(token)
+      if (session && new Date(session.expiresAt) > new Date()) {
+        // #region agent log
+        logDebug('electron/main.ts:getUserIdFromToken', 'User ID resolved from token', { token: token.substring(0, 8) + '...', userId: session.userId }, 'A')
+        // #endregion
+        return session.userId
+      } else {
+        // #region agent log
+        logDebug('electron/main.ts:getUserIdFromToken', 'Session invalid or expired', { hasSession: !!session, expired: session ? new Date(session.expiresAt) < new Date() : false }, 'A')
+        // #endregion
+      }
+    } catch (error) {
+      console.error('Ошибка при получении userId из токена:', error)
+      // #region agent log
+      logDebug('electron/main.ts:getUserIdFromToken', 'Error getting userId', { error: error instanceof Error ? error.message : String(error) }, 'A')
+      // #endregion
+    }
+    return null
+  }
+
   function registerIpc() {
     if (!db) return
 
     // Auth
-    ipcMain.handle('auth:login', (_event, payload) => db?.login(payload))
-    ipcMain.handle('auth:logout', () => {})
-    ipcMain.handle('auth:getCurrentUser', () => db?.listUsers()?.[0] ?? null)
-    ipcMain.handle('auth:checkSession', (_event, token) => {
-      const session = token ? db?.getSessionByToken(token) : null
-      if (session && new Date(session.expiresAt) > new Date()) {
-        return db?.getUserById(session.userId) ?? null
+    ipcMain.handle('auth:login', (_event, payload) => {
+      try {
+        // Получаем IP и User-Agent из события (если доступны)
+        const ipAddress = _event.sender.getURL() || undefined
+        const userAgent = _event.sender.getUserAgent() || undefined
+        const result = db?.login(payload, ipAddress, userAgent)
+        // #region agent log
+        if (result) logDebug('electron/main.ts:auth:login', 'User logged in', { userId: result.user.id, username: result.user.username }, 'A')
+        // #endregion
+        return result
+      } catch (error) {
+        // #region agent log
+        logDebug('electron/main.ts:auth:login', 'Login failed', { error: error instanceof Error ? error.message : String(error) }, 'A')
+        // #endregion
+        throw error
       }
-      return db?.listUsers()?.[0] ?? null
+    })
+    ipcMain.handle('auth:logout', (_event, token) => {
+      if (token && db) {
+        const session = db.getSessionByToken(token)
+        if (session) {
+          // Логируем выход
+          db.logAuditEvent(session.userId, 'logout', 'user', session.userId, null)
+        }
+        db.deleteSession(token)
+        // #region agent log
+        logDebug('electron/main.ts:auth:logout', 'User logged out', { token: token.substring(0, 8) + '...' }, 'A')
+        // #endregion
+      }
+    })
+    ipcMain.handle('auth:getCurrentUser', (_event, token) => {
+      const userId = getUserIdFromToken(token)
+      if (userId) {
+        const user = db?.getUserById(userId)
+        // #region agent log
+        if (user) logDebug('electron/main.ts:auth:getCurrentUser', 'Current user retrieved', { userId: user.id, username: user.username }, 'A')
+        // #endregion
+        return user ?? null
+      }
+      // #region agent log
+      logDebug('electron/main.ts:auth:getCurrentUser', 'No user found', { hasToken: !!token }, 'A')
+      // #endregion
+      return null
     })
 
-    // Users
-    ipcMain.handle('users:list', () => db?.listUsers())
-    ipcMain.handle('users:create', (_event, payload) => db?.createUser(payload))
-    ipcMain.handle('users:update', (_event, payload) => db?.updateUser(payload))
-    ipcMain.handle('users:delete', (_event, id) => db?.deleteUser(id))
+    // Обновление токена сессии
+    ipcMain.handle('auth:refreshSession', (_event, token) => {
+      if (!db || !token) return null
+      try {
+        const refreshed = db.refreshSession(token, 30)
+        // #region agent log
+        if (refreshed) logDebug('electron/main.ts:auth:refreshSession', 'Session refreshed', { userId: refreshed.userId }, 'A')
+        // #endregion
+        return refreshed
+      } catch (error) {
+        console.error('Ошибка при обновлении сессии:', error)
+        return null
+      }
+    })
+    ipcMain.handle('auth:checkSession', (_event, token) => {
+      const userId = getUserIdFromToken(token)
+      if (userId) {
+        const user = db?.getUserById(userId)
+        // #region agent log
+        if (user) logDebug('electron/main.ts:auth:checkSession', 'Session checked', { userId: user.id, username: user.username }, 'A')
+        // #endregion
+        return user ?? null
+      }
+      // #region agent log
+      logDebug('electron/main.ts:auth:checkSession', 'Session invalid', { hasToken: !!token }, 'A')
+      // #endregion
+      return null
+    })
 
-    ipcMain.handle('products:list', () => db?.listProducts())
-    ipcMain.handle('products:create', (_event, payload) => db?.createProduct(payload))
-    ipcMain.handle('products:update', (_event, payload) => db?.updateProduct(payload))
-    ipcMain.handle('products:delete', (_event, id) => db?.deleteProduct(id))
+    // Users (admin only - проверяем права)
+    ipcMain.handle('users:list', (_event, token) => {
+      const userId = getUserIdFromToken(token)
+      if (!userId) throw new Error('Не авторизован')
+      const user = db?.getUserById(userId)
+      if (!user || user.role !== 'admin') throw new Error('Доступ запрещен')
+      return db?.listUsers()
+    })
+    ipcMain.handle('users:create', (_event, payload, token) => {
+      const userId = getUserIdFromToken(token)
+      if (!userId) throw new Error('Не авторизован')
+      const user = db?.getUserById(userId)
+      if (!user || user.role !== 'admin') throw new Error('Доступ запрещен')
+      return db?.createUser(payload)
+    })
+    ipcMain.handle('users:update', (_event, payload, token) => {
+      const userId = getUserIdFromToken(token)
+      if (!userId) throw new Error('Не авторизован')
+      const user = db?.getUserById(userId)
+      if (!user || user.role !== 'admin') throw new Error('Доступ запрещен')
+      return db?.updateUser(payload)
+    })
+    ipcMain.handle('users:delete', (_event, id, token) => {
+      const userId = getUserIdFromToken(token)
+      if (!userId) throw new Error('Не авторизован')
+      const user = db?.getUserById(userId)
+      if (!user || user.role !== 'admin') throw new Error('Доступ запрещен')
+      db?.deleteUser(id)
+    })
 
-    ipcMain.handle('operations:list', () => db?.listOperations())
-    ipcMain.handle('operations:create', (_event, payload) => db?.createOperation(payload))
-    ipcMain.handle('operations:delete', (_event, id) => db?.deleteOperation(id))
+    // Products - с проверкой userId
+    ipcMain.handle('products:list', (_event, token) => {
+      const userId = getUserIdFromToken(token)
+      if (!userId) {
+        // #region agent log
+        logDebug('electron/main.ts:products:list', 'Unauthorized access attempt', { hasToken: !!token, tokenLength: token?.length }, 'B')
+        // #endregion
+        throw new Error('Не авторизован')
+      }
+      // #region agent log
+      logDebug('electron/main.ts:products:list', 'Listing products for user', { userId }, 'B')
+      // #endregion
+      return db?.listProducts(userId)
+    })
+    ipcMain.handle('products:create', (_event, payload, token) => {
+      const userId = getUserIdFromToken(token)
+      if (!userId) throw new Error('Не авторизован')
+      // #region agent log
+      logDebug('electron/main.ts:products:create', 'Creating product for user', { userId, productName: payload.name }, 'B')
+      // #endregion
+      return db?.createProduct(payload, userId)
+    })
+    ipcMain.handle('products:update', (_event, payload, token) => {
+      const userId = getUserIdFromToken(token)
+      if (!userId) throw new Error('Не авторизован')
+      // #region agent log
+      logDebug('electron/main.ts:products:update', 'Updating product for user', { userId, productId: payload.id }, 'B')
+      // #endregion
+      return db?.updateProduct(payload, userId)
+    })
+    ipcMain.handle('products:delete', (_event, id, token) => {
+      const userId = getUserIdFromToken(token)
+      if (!userId) throw new Error('Не авторизован')
+      // #region agent log
+      logDebug('electron/main.ts:products:delete', 'Deleting product for user', { userId, productId: id }, 'B')
+      // #endregion
+      db?.deleteProduct(id, userId)
+    })
 
-    ipcMain.handle('dashboard:get', () => db?.getDashboard())
-    ipcMain.handle('reservations:list', () => db?.listReservations())
-    ipcMain.handle('reservations:update', (_event, payload) => db?.updateReservation(payload))
-    ipcMain.handle('reminders:list', () => db?.listReminders())
-    ipcMain.handle('reminders:create', (_event, payload) => db?.createReminder(payload))
-    ipcMain.handle('reminders:update', (_event, payload) => db?.updateReminder(payload))
+    // Operations - с проверкой userId
+    ipcMain.handle('operations:list', (_event, token) => {
+      const userId = getUserIdFromToken(token)
+      if (!userId) {
+        logDebug('electron/main.ts:operations:list', 'Unauthorized access attempt', { hasToken: !!token }, 'B')
+        throw new Error('Не авторизован')
+      }
+      return db?.listOperations(userId)
+    })
+    ipcMain.handle('operations:create', (_event, payload, token) => {
+      const userId = getUserIdFromToken(token)
+      if (!userId) {
+        logDebug('electron/main.ts:operations:create', 'Unauthorized access attempt', { hasToken: !!token }, 'B')
+        throw new Error('Не авторизован')
+      }
+      // #region agent log
+      logDebug('electron/main.ts:operations:create', 'Creating operation for user', { userId, operationType: payload.type, productId: payload.productId }, 'B')
+      // #endregion
+      return db?.createOperation(payload, userId)
+    })
+    ipcMain.handle('operations:delete', (_event, id, token) => {
+      const userId = getUserIdFromToken(token)
+      if (!userId) {
+        logDebug('electron/main.ts:operations:delete', 'Unauthorized access attempt', { hasToken: !!token }, 'B')
+        throw new Error('Не авторизован')
+      }
+      db?.deleteOperation(id, userId)
+    })
 
-    // Full snapshot sync (local)
-    ipcMain.handle('sync:pull', () => db?.exportSnapshot(true))
-    ipcMain.handle('sync:push', (_event, snapshot) => {
-      db?.importSnapshot(snapshot)
+    // Dashboard - с проверкой userId
+    ipcMain.handle('dashboard:get', (_event, token) => {
+      const userId = getUserIdFromToken(token)
+      if (!userId) throw new Error('Не авторизован')
+      return db?.getDashboard(userId)
+    })
+    
+    // Reservations - с проверкой userId
+    ipcMain.handle('reservations:list', (_event, token) => {
+      const userId = getUserIdFromToken(token)
+      if (!userId) throw new Error('Не авторизован')
+      return db?.listReservations(userId)
+    })
+    ipcMain.handle('reservations:update', (_event, payload, token) => {
+      const userId = getUserIdFromToken(token)
+      if (!userId) throw new Error('Не авторизован')
+      return db?.updateReservation(payload, userId)
+    })
+    
+    // Reminders - с проверкой userId
+    ipcMain.handle('reminders:list', (_event, token) => {
+      const userId = getUserIdFromToken(token)
+      if (!userId) throw new Error('Не авторизован')
+      return db?.listReminders(userId)
+    })
+    ipcMain.handle('reminders:create', (_event, payload, token) => {
+      const userId = getUserIdFromToken(token)
+      if (!userId) throw new Error('Не авторизован')
+      return db?.createReminder(payload, userId)
+    })
+    ipcMain.handle('reminders:update', (_event, payload, token) => {
+      const userId = getUserIdFromToken(token)
+      if (!userId) throw new Error('Не авторизован')
+      return db?.updateReminder(payload, userId)
+    })
+
+    // Full snapshot sync (local) - с проверкой userId
+    ipcMain.handle('sync:pull', (_event, token) => {
+      const userId = getUserIdFromToken(token)
+      if (!userId) throw new Error('Не авторизован')
+      return db?.exportSnapshot(true, userId)
+    })
+    ipcMain.handle('sync:push', (_event, snapshot, token) => {
+      const userId = getUserIdFromToken(token)
+      if (!userId) throw new Error('Не авторизован')
+      db?.importSnapshot(snapshot, userId)
       return { success: true }
     })
 
-    ipcMain.handle('sync:getGoogleDriveConfig', () => {
-      const user = db?.listUsers()?.[0]
-      if (!user) return null
-      return db?.getUserGoogleDriveConfig(user.id)
+    ipcMain.handle('sync:getGoogleDriveConfig', (_event, token) => {
+      const userId = getUserIdFromToken(token)
+      if (!userId) throw new Error('Не авторизован')
+      return db?.getUserGoogleDriveConfig(userId)
     })
-    ipcMain.handle('sync:saveGoogleDriveConfig', (_event, clientId: string, clientSecret: string) => {
-      const user = db?.listUsers()?.[0]
-      if (!db || !user) throw new Error('Пользователь не найден')
-      db.updateUserGoogleDriveConfig(user.id, clientId, clientSecret)
+    ipcMain.handle('sync:saveGoogleDriveConfig', (_event, clientId: string, clientSecret: string, token) => {
+      const userId = getUserIdFromToken(token)
+      if (!userId) throw new Error('Не авторизован')
+      if (!db) throw new Error('База данных не инициализирована')
+      db.updateUserGoogleDriveConfig(userId, clientId, clientSecret)
       return { success: true }
     })
 

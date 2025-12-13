@@ -23,6 +23,7 @@ export interface InventoryAPI {
   logout: () => Promise<void>
   getCurrentUser: () => Promise<User | null>
   checkSession: (token: string) => Promise<User | null>
+  refreshSession?: (token: string) => Promise<{ token: string; expiresAt: string } | null>
   // Users (admin only)
   listUsers: () => Promise<User[]>
   createUser: (payload: CreateUserPayload) => Promise<User>
