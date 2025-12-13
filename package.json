@@ -3,6 +3,8 @@
   "private": true,
   "version": "0.1.0",
   "type": "module",
+  "description": "Inventory Desktop - система управления складом с синхронизацией",
+  "author": "asintiko",
   "main": "dist-electron/main.js",
   "scripts": {
     "dev": "cross-env ELECTRON_RUN_AS_NODE= vite",
